@@ -28,7 +28,8 @@
   </script>
   <!-- Babel Standalone for JSX compilation in Browser -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <!-- 실시간 다중 기기(스마트폰 ⇄ PC) 동기화를 위한 분산 클라우드 엔진 -->
+  <!-- 안드로이드 & 아이폰(iOS Safari) & PC 100% 호환 글로벌 실시간 클라우드 브로커 (MQTT over WSS) -->
+  <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
 </head>
 <body class="bg-slate-100 text-slate-800 antialiased">
@@ -48,45 +49,55 @@
     import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
     import { getFirestore, doc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, serverTimestamp, getDocs } from 'firebase/firestore';
 
-    // 1. Firebase Initialization (Canvas 클라우드 환경 + 외부 GitHub/Vercel 단독 호스팅 환경 모두 자동 호환)
-    const STORAGE_KEY_RECORDS = 'ent_iptv_records_v2';
-    const STORAGE_KEY_MEMBERS = 'ent_iptv_members_v2';
-    const STORAGE_KEY_SESSION = 'ent_iptv_session_v2';
-    const STORAGE_KEY_FB_CONFIG = 'ent_iptv_fb_config_v2';
-    const STORAGE_KEY_SYNC_ID = 'ent_iptv_cloud_sync_id_v4';
+    // 1. Storage Keys (v6로 업그레이드하여 이전 더미 회원 및 26개 샘플 고객 자동 초기화)
+    const STORAGE_KEY_RECORDS = 'ent_iptv_records_v6';
+    const STORAGE_KEY_MEMBERS = 'ent_iptv_members_v6';
+    const STORAGE_KEY_SESSION = 'ent_iptv_session_v6';
+    const STORAGE_KEY_FB_CONFIG = 'ent_iptv_fb_config_v6';
+    const STORAGE_KEY_DELETED_MEMS = 'ent_iptv_deleted_members_v6';
+    const STORAGE_KEY_DELETED_RECS = 'ent_iptv_deleted_records_v6';
 
-    // 스마트폰 ⇄ PC 간 100% 실시간 동기화를 위한 다중 클라우드 브릿지 (GUN 실시간 P2P/Relay + 다중 REST 클라우드)
-    const DEFAULT_SYNC_DOC_ID = 'ent2103_iptv_master_v4';
-    const REST_SYNC_ENDPOINTS = [
-      `https://kvdb.io/6Wa9pQ2mK8vX3nL5rT1yB/${DEFAULT_SYNC_DOC_ID}`,
-      `https://api.keyvalue.xyz/3e8b9c1a/${DEFAULT_SYNC_DOC_ID}`
+    // 스마트폰(Android/iOS) ⇄ PC 간 100% 실시간 동기화를 위한 다중 클라우드 채널
+    const SYNC_CHANNEL_TOPIC = 'ent2103/iptv/sync/v6/state';
+    const SYNC_PING_TOPIC = 'ent2103/iptv/sync/v6/ping';
+    const MQTT_BROKERS = [
+      'wss://broker.emqx.io:8084/mqtt',
+      'wss://broker.hivemq.com:8884/mqtt'
     ];
+    const REST_KV_URL = 'https://kvdb.io/6Wa9pQ2mK8vX3nL5rT1yB/ent2103_iptv_v6_master';
 
-    // 실시간 WebSocket 중계 서버 초기화
-    let gunDbNode = null;
-    try {
-      if (window.Gun) {
-        const gun = window.Gun({
-          peers: [
-            'https://gun-manhattan.herokuapp.com/gun',
-            'https://peer.wallie.io/gun',
-            'https://gundb-relay-mlccl.ondigitalocean.app/gun'
-          ],
-          localStorage: false
-        });
-        gunDbNode = gun.get('ent2103_iptv_global_sync_v4');
+    // 삭제된 회원/레코드가 다시 살아나지 않도록 삭제 이력 관리
+    const getDeletedMemberSet = () => {
+      try {
+        return new Set(JSON.parse(localStorage.getItem(STORAGE_KEY_DELETED_MEMS) || '[]'));
+      } catch (e) {
+        return new Set();
       }
-    } catch (e) {
-      console.warn('Gun init fallback:', e);
-    }
+    };
+    const addDeletedMemberKey = (username) => {
+      if (!username) return;
+      const set = getDeletedMemberSet();
+      set.add(String(username).trim().toLowerCase());
+      try { localStorage.setItem(STORAGE_KEY_DELETED_MEMS, JSON.stringify(Array.from(set))); } catch (e) {}
+    };
+    const removeDeletedMemberKey = (username) => {
+      if (!username) return;
+      const set = getDeletedMemberSet();
+      set.delete(String(username).trim().toLowerCase());
+      try { localStorage.setItem(STORAGE_KEY_DELETED_MEMS, JSON.stringify(Array.from(set))); } catch (e) {}
+    };
 
     // 여러 기기 데이터를 합칠 때 스마트폰에서 신청한 신규 회원이나 수정된 회원 정보가 절대 덮어써지지 않도록 스마트 병합
-    const mergeMembersList = (localList = [], remoteList = []) => {
+    const mergeMembersList = (localList = [], remoteList = [], deletedKeys = []) => {
+      const delSet = new Set([
+        ...Array.from(getDeletedMemberSet()),
+        ...(Array.isArray(deletedKeys) ? deletedKeys.map(k => String(k).toLowerCase()) : [])
+      ]);
       const map = new Map();
-      // 기본 관리자 및 초기 멤버가 누락되지 않도록 보장
       [...INITIAL_MEMBERS, ...localList, ...remoteList].forEach((m) => {
         if (!m || !m.username) return;
         const key = String(m.username).trim().toLowerCase();
+        if (key !== 'ent2103' && delSet.has(key)) return;
         const existing = map.get(key);
         if (!existing) {
           map.set(key, { ...m, username: String(m.username).trim() });
@@ -162,44 +173,14 @@
     const BASE_UNIT_PRICE = 35000;
     const DIFFICULT_EXTRA_PRICE = 10000;
 
-    // 엑셀 시트 기반 27개 초기 데이터
+    // 고객명 '강서K병원' 1건만 남기고 나머지 샘플 고객은 모두 삭제
     const INITIAL_DATA = [
-      { id: 'rec_1', seq: 1, staffName: '박국용', subNumber: '500-2404-1001', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '디컴스', manager: '이대운', contact: '010-6776-5602', customer: '강서K병원', address: '서울 강서구 화곡동 377-8', lines: 19, scheduledDate: '2024-04-24', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_2', seq: 2, staffName: '박정훈', subNumber: '500-2404-1002', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '아모레미오 클래식점(휴먼터치 1호점)', address: '수원시팔달구 향교로 3번길 36', lines: 60, scheduledDate: '2024-04-24', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_3', seq: 3, staffName: '오세웅', subNumber: '500-2404-1003', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '아모레미오 빈티지점(휴먼터치2호점)', address: '수원시팔달구 향교로 3번길 36', lines: 33, scheduledDate: '2024-04-25', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_4', seq: 4, staffName: '서진섭', subNumber: '500-2404-1004', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 델컴스', manager: '이승재', contact: '010-5768-3122', customer: '인성금오요양원', address: '수원시 장안구 정조로 992번길 15-7', lines: 2, scheduledDate: '2024-04-24', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_5', seq: 5, staffName: '김경민', subNumber: '500-2405-1005', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '젤라', address: '서울 강북구 미아동 189-1', lines: 16, scheduledDate: '2024-05-29', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_6', seq: 6, staffName: '이근', subNumber: '500-2405-1006', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '신정형외과의원', address: '경기도 고양시 덕양구 행신동 616-1', lines: 9, scheduledDate: '2024-05-14', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_7', seq: 7, staffName: '하형준', subNumber: '500-2405-1007', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜온파워네트웍스', manager: '', contact: '', customer: '늘사랑실버케어센터', address: '경기도 남양주시 평내동 579', lines: 1, scheduledDate: '2024-05-22', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_8', seq: 8, staffName: '손민아', subNumber: '500-2405-1008', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜지디네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '세아빌1', address: '서울시 동대문구 무학로35길 19', lines: 16, scheduledDate: '2024-05-31', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_9', seq: 9, staffName: '박국용', subNumber: '500-2405-1009', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜지디네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '세아빌2', address: '서울시 동대문구 천호대로13길 59-3', lines: 12, scheduledDate: '2024-05-31', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_10', seq: 10, staffName: '박정훈', subNumber: '500-2406-1010', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '레지던스어울림계양구청점', address: '인천광역시 계양구 오조산로57번길 11-1', lines: 54, scheduledDate: '2024-06-27', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_11', seq: 11, staffName: '오세웅', subNumber: '500-2406-1011', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '문스테이션호점', address: '서울 강동구 천호동 295-31', lines: 47, scheduledDate: '2024-06-27', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_12', seq: 12, staffName: '서진섭', subNumber: '500-2406-1012', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜지디네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '이효국', address: '서울 강남구 개포동 1218-20', lines: 15, scheduledDate: '2024-06-28', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_13', seq: 13, staffName: '김경민', subNumber: '500-2407-1013', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '반포동앤드원스테이', address: '서초구 반포동 54-12 3층', lines: 32, scheduledDate: '2024-07-25', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_14', seq: 14, staffName: '이근', subNumber: '500-2407-1014', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '자양한방병원', address: '연수구 신송로 154 4층', lines: 40, scheduledDate: '2024-07-26', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_15', seq: 15, staffName: '하형준', subNumber: '500-2407-1015', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '대원장모텔', address: '인천 중구 반달로 9번길 21', lines: 16, scheduledDate: '2024-07-30', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_16', seq: 16, staffName: '손민아', subNumber: '500-2408-1016', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '비플', manager: '이병렬', contact: '010-7179-5750', customer: '한마음외과의원', address: '권선구 경수대로 321', lines: 14, scheduledDate: '2024-08-01', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_17', seq: 17, staffName: '박국용', subNumber: '500-2408-1017', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '싱글하우스', address: '일산로 143, 5층 (백석동1146, 형진빌딩)', lines: 28, scheduledDate: '2024-08-13', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_18', seq: 18, staffName: '박정훈', subNumber: '500-2408-1018', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜온파워네트웍스', manager: '', contact: '', customer: '살렘요양원', address: '파주시 방촌로 548번길 40-3', lines: 1, scheduledDate: '2024-08-13', remarks: '정산서류제출완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_19', seq: 19, staffName: '오세웅', subNumber: '500-2408-1019', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '비플', manager: '이병렬', contact: '010-8408-0720', customer: '굿모닝노인전문요양원', address: '평택시 현덕면 현덕로 1095-5', lines: 12, scheduledDate: '2024-08-21', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_20', seq: 20, staffName: '서진섭', subNumber: '500-2408-1020', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '위드니스케이', address: '의정부시 녹양로 55', lines: 12, scheduledDate: '2024-08-22', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_21', seq: 21, staffName: '김경민', subNumber: '500-2408-1021', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '코앤리빙텔', address: '시흥시 마유로415', lines: 52, scheduledDate: '2024-08-28', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_22', seq: 22, staffName: '이근', subNumber: '500-2408-1022', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '솔빛원룸텔', address: '구리시 안골로49 3층, 9층', lines: 63, scheduledDate: '작업 일정 미정', remarks: '취소', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_23', seq: 23, staffName: '하형준', subNumber: '500-2408-1023', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '애플스테이', address: '부천시 원미구 심곡동 388-11 2층', lines: 20, scheduledDate: '2024-08-23', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_24', seq: 24, staffName: '손민아', subNumber: '500-2408-1024', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '라움스테이원룸텔', address: '금천구 시흥대로62길 18-4 1층', lines: 12, scheduledDate: '2024-08-30', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
-      { id: 'rec_25', seq: 25, staffName: '박국용', subNumber: '500-2409-1025', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '클래스원스테이', address: '구리시 수택동 438-34', lines: 27, scheduledDate: '2024-09-04', remarks: '정산완료', extraNote: '', isHighlighted: true, attachments: [] },
-      { id: 'rec_26', seq: 26, staffName: '박정훈', subNumber: '500-2409-1026', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '다나씨엠', address: '천호대로159길 13', lines: 41, scheduledDate: '2024-09-24', remarks: '정산완료', extraNote: '12월', isHighlighted: true, attachments: [] },
-      { id: 'rec_27', seq: 27, staffName: '오세웅', subNumber: '500-2409-1027', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '서울미즈병원', address: '천호대로 1043', lines: 72, scheduledDate: '2024-09-09', remarks: '정산완료', extraNote: '12월', isHighlighted: false, attachments: [] }
+      { id: 'rec_1', seq: 1, staffName: '박국용', subNumber: '500-2404-1001', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '디컴스', manager: '이대운', contact: '010-6776-5602', customer: '강서K병원', address: '서울 강서구 화곡동 377-8', lines: 19, scheduledDate: '2024-04-24', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [], updatedAtMs: 1713916800000 }
     ];
 
-    // 초기 회원 데이터 (대표님 관리자 계정: ent2103 / ronaldono9!@)
+    // 최고관리자(ent2103)를 제외한 나머지 샘플 회원 및 승인요청 회원 전체 삭제
     const INITIAL_MEMBERS = [
-      { id: 'mem_admin', username: 'ent2103', password: 'ronaldono9!@', name: '대표님(총괄관리자)', department: '대표이사', phone: '010-0000-0000', role: 'admin', status: 'approved', requestedAt: '2024-04-01' },
-      { id: 'mem_1', username: 'park', password: '1234', name: '박국용', department: '(주)이앤티 구내공사팀', phone: '010-1111-2222', role: 'member', status: 'approved', requestedAt: '2024-04-05' },
-      { id: 'mem_2', username: 'lee', password: '1234', name: '이대운', department: '주식회사 디컴스', phone: '010-6776-5602', role: 'member', status: 'approved', requestedAt: '2024-04-10' },
-      { id: 'mem_3', username: 'jung', password: '1234', name: '정산헌', department: 'JD네트웍스', phone: '010-8388-9691', role: 'member', status: 'pending', requestedAt: '2024-09-20' },
-      { id: 'mem_4', username: 'kim', password: '1234', name: '김경민', department: '구내공사 시공팀', phone: '010-5555-8282', role: 'member', status: 'pending', requestedAt: '2024-09-25' }
+      { id: 'mem_admin', username: 'ent2103', password: 'ronaldono9!@', name: '대표님(총괄관리자)', department: '대표이사', phone: '010-0000-0000', role: 'admin', status: 'approved', requestedAt: '2024-04-01', updatedAtMs: 1711929600000 }
     ];
 
     const DEFAULT_FORM = {
@@ -242,15 +223,24 @@
           const saved = localStorage.getItem(STORAGE_KEY_MEMBERS);
           if (saved) {
             const parsed = JSON.parse(saved);
-            if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+            if (Array.isArray(parsed) && parsed.length > 0) return mergeMembersList(parsed, []);
           }
         } catch (e) {}
         return INITIAL_MEMBERS;
       });
       const [loading, setLoading] = useState(hasCloudFirebase);
       
-      // 도메인 접속 시 항상 로그인 창이 먼저 나오도록 초기 상태를 null(비로그인)로 설정
-      const [currentMember, setCurrentMember] = useState(null);
+      // 처음 도메인 접속 시 로그인 창이 나오고, 로그인 후 새로고침(F5) 시에는 로그아웃되지 않도록 sessionStorage 사용
+      const [currentMember, setCurrentMember] = useState(() => {
+        try {
+          const savedSession = sessionStorage.getItem(STORAGE_KEY_SESSION);
+          if (savedSession) {
+            const parsed = JSON.parse(savedSession);
+            if (parsed && parsed.username) return parsed;
+          }
+        } catch (e) {}
+        return null;
+      });
       const [authTab, setAuthTab] = useState('LOGIN');
       const [loginForm, setLoginForm] = useState({ username: '', password: '' });
       const [signupForm, setSignupForm] = useState({
@@ -296,7 +286,7 @@
       const [passwordInput, setPasswordInput] = useState('');
       const [passwordError, setPasswordError] = useState('');
       const [lastSyncedAt, setLastSyncedAt] = useState('');
-      const [syncStatus, setSyncStatus] = useState('연결 확인중...');
+      const [syncStatus, setSyncStatus] = useState('모바일·PC 실시간 브릿지 연결중...');
 
       // 회원 정보 직접 수정 & 관리자 직접 회원 등록 상태
       const [editingMemberId, setEditingMemberId] = useState(null);
@@ -320,13 +310,25 @@
       const [showAddMemberRow, setShowAddMemberRow] = useState(false);
       const [memberManageNotice, setMemberManageNotice] = useState('');
 
-      // 최신 상태 참조용 Ref (비동기 타이머나 이벤트에서 항상 최신 회원/레코드 목록을 유지)
+      // 최신 상태 참조용 Ref & MQTT 클라이언트 Ref
       const membersRefState = useRef(members);
       const recordsRefState = useRef(records);
+      const mqttClientsRef = useRef([]);
       useEffect(() => { membersRefState.current = members; }, [members]);
       useEffect(() => { recordsRefState.current = records; }, [records]);
 
-      // --- 공용 클라우드 실시간 동기화 헬퍼 (스마트폰 ⇄ PC 간 100% 양방향 병합 동기화) ---
+      // 로그인 상태 변경 시 sessionStorage에 저장 (새로고침 F5 시에도 로그아웃되지 않고 유지됨)
+      useEffect(() => {
+        try {
+          if (currentMember) {
+            sessionStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(currentMember));
+          } else {
+            sessionStorage.removeItem(STORAGE_KEY_SESSION);
+          }
+        } catch (e) {}
+      }, [currentMember]);
+
+      // --- 공용 클라우드 실시간 동기화 헬퍼 (안드로이드·iOS ⇄ PC 100% 양방향 병합 동기화) ---
       const saveMembersToLocal = (list) => {
         try {
           localStorage.setItem(STORAGE_KEY_MEMBERS, JSON.stringify(list));
@@ -337,6 +339,31 @@
         try {
           localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(list));
         } catch (e) {}
+      };
+
+      // MQTT 실시간 브로커로 현재 상태를 브로드캐스트 (Retain 옵션 적용으로 나중에 켠 기기도 즉시 수신)
+      const broadcastViaMqtt = (recordsList, membersList) => {
+        const lightRecords = (recordsList || []).map(r => ({
+          ...r,
+          attachments: (r.attachments || []).slice(0, 2)
+        }));
+        const messageStr = JSON.stringify({
+          updatedAt: Date.now(),
+          members: membersList || [],
+          records: lightRecords,
+          deletedMembers: Array.from(getDeletedMemberSet())
+        });
+
+        let sent = false;
+        mqttClientsRef.current.forEach((client) => {
+          try {
+            if (client && client.connected) {
+              client.publish(SYNC_CHANNEL_TOPIC, messageStr, { qos: 1, retain: true });
+              sent = true;
+            }
+          } catch (e) {}
+        });
+        return sent;
       };
 
       const pushSharedState = async (nextRecords, nextMembers) => {
@@ -350,70 +377,52 @@
         let mergedMembers = mList;
         let mergedRecords = rList;
 
-        // 1) 실시간 WebSocket 브릿지(GUN)로 즉시 브로드캐스트 (스마트폰 가입 시 대표님 PC에 0.5초 내 즉시 팝업)
+        // 1) 안드로이드 / iOS / PC 즉시 동기화: MQTT Retained 메시지 즉시 발송
+        const mqttSent = broadcastViaMqtt(mergedRecords, mergedMembers);
+
+        // 2) 백업 REST 클라우드 스토리지 병합 및 저장
         try {
-          if (gunDbNode) {
-            gunDbNode.get('members_json').put(JSON.stringify({
-              updatedAt: Date.now(),
-              members: mergedMembers
-            }));
-            // 첨부파일 용량이 클 수 있으므로 레코드 메타데이터 전송
-            const lightRecords = mergedRecords.map(r => ({ ...r, attachments: (r.attachments || []).slice(0, 3) }));
-            gunDbNode.get('records_json').put(JSON.stringify({
-              updatedAt: Date.now(),
-              records: lightRecords
-            }));
+          const checkRes = await fetch(`${REST_KV_URL}?t=${Date.now()}`, { cache: 'no-store' });
+          if (checkRes.ok) {
+            const remoteData = await checkRes.json();
+            if (remoteData && Array.isArray(remoteData.members)) {
+              mergedMembers = mergeMembersList(mergedMembers, remoteData.members, remoteData.deletedMembers);
+            }
+            if (remoteData && Array.isArray(remoteData.records)) {
+              mergedRecords = mergeRecordsList(mergedRecords, remoteData.records);
+            }
           }
         } catch (e) {}
 
-        // 2) 다중 REST 클라우드 스토리지 병합 및 백업 전송
-        for (const endpoint of REST_SYNC_ENDPOINTS) {
-          try {
-            const checkRes = await fetch(`${endpoint}?t=${Date.now()}`, { cache: 'no-store' });
-            if (checkRes.ok) {
-              const remoteData = await checkRes.json();
-              if (remoteData && Array.isArray(remoteData.members)) {
-                mergedMembers = mergeMembersList(mergedMembers, remoteData.members);
-              }
-              if (remoteData && Array.isArray(remoteData.records)) {
-                mergedRecords = mergeRecordsList(mergedRecords, remoteData.records);
-              }
-              break;
-            }
-          } catch (e) {}
-        }
-
-        // 병합된 최종 결과를 로컬과 UI에 즉시 반영
         saveMembersToLocal(mergedMembers);
         saveRecordsToLocal(mergedRecords);
         setMembers(mergedMembers);
         setRecords(mergedRecords);
 
-        const payloadStr = JSON.stringify({
-          updatedAt: Date.now(),
-          records: mergedRecords,
-          members: mergedMembers
-        });
+        // 병합된 최종본을 다시 한번 MQTT Retain + REST 서버에 저장
+        broadcastViaMqtt(mergedRecords, mergedMembers);
 
-        let syncedOk = Boolean(gunDbNode);
-        for (const endpoint of REST_SYNC_ENDPOINTS) {
-          try {
-            const res = await fetch(endpoint, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: payloadStr
-            });
-            if (res.ok) syncedOk = true;
-          } catch (e) {}
-        }
+        let restOk = false;
+        try {
+          const res = await fetch(REST_KV_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              updatedAt: Date.now(),
+              records: mergedRecords,
+              members: mergedMembers,
+              deletedMembers: Array.from(getDeletedMemberSet())
+            })
+          });
+          if (res.ok) restOk = true;
+        } catch (e) {}
 
         setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
-        setSyncStatus(syncedOk ? '실시간 클라우드 연동됨' : '기기 내부 저장됨');
+        setSyncStatus((mqttSent || restOk) ? '스마트폰·PC 실시간 연동중' : '기기 로컬 저장됨');
         return { records: mergedRecords, members: mergedMembers };
       };
 
       const pullSharedState = async () => {
-        // 먼저 로컬스토리지에 저장된 데이터와 현재 메모리를 한 번 병합
         let currentMembers = membersRefState.current;
         let currentRecords = recordsRefState.current;
         try {
@@ -425,36 +434,35 @@
 
         if (hasCloudFirebase) return { members: currentMembers, records: currentRecords };
 
-        let remoteData = null;
-        for (const endpoint of REST_SYNC_ENDPOINTS) {
+        // 다른 연결된 기기들에게 최신 상태 요청 핑 발송
+        mqttClientsRef.current.forEach((client) => {
           try {
-            const res = await fetch(`${endpoint}?t=${Date.now()}`, { cache: 'no-store' });
-            if (res.ok) {
-              const parsed = await res.json();
-              if (parsed && (Array.isArray(parsed.members) || Array.isArray(parsed.records))) {
-                remoteData = parsed;
-                break;
-              }
+            if (client && client.connected) {
+              client.publish(SYNC_PING_TOPIC, JSON.stringify({ ts: Date.now() }));
             }
           } catch (e) {}
-        }
+        });
 
-        if (remoteData) {
-          if (Array.isArray(remoteData.members) && remoteData.members.length > 0) {
-            currentMembers = mergeMembersList(currentMembers, remoteData.members);
-            saveMembersToLocal(currentMembers);
-            setMembers(currentMembers);
+        try {
+          const res = await fetch(`${REST_KV_URL}?t=${Date.now()}`, { cache: 'no-store' });
+          if (res.ok) {
+            const remoteData = await res.json();
+            if (remoteData) {
+              if (Array.isArray(remoteData.members) && remoteData.members.length > 0) {
+                currentMembers = mergeMembersList(currentMembers, remoteData.members, remoteData.deletedMembers);
+                saveMembersToLocal(currentMembers);
+                setMembers(currentMembers);
+              }
+              if (Array.isArray(remoteData.records) && remoteData.records.length > 0) {
+                currentRecords = mergeRecordsList(currentRecords, remoteData.records);
+                saveRecordsToLocal(currentRecords);
+                setRecords(currentRecords);
+              }
+              setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
+              setSyncStatus('스마트폰·PC 실시간 연동중');
+            }
           }
-          if (Array.isArray(remoteData.records) && remoteData.records.length > 0) {
-            currentRecords = mergeRecordsList(currentRecords, remoteData.records);
-            saveRecordsToLocal(currentRecords);
-            setRecords(currentRecords);
-          }
-          setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
-          setSyncStatus('실시간 클라우드 연동됨');
-        } else {
-          setMembers(currentMembers);
-        }
+        } catch (e) {}
 
         return { members: currentMembers, records: currentRecords };
       };
@@ -548,55 +556,92 @@
         }
       };
 
-      // 도메인 접속 시 자동 로그인 방지를 위해 기존 저장된 로그인 세션 초기화
-      useEffect(() => {
-        try {
-          localStorage.removeItem(STORAGE_KEY_SESSION);
-        } catch (e) {}
-      }, []);
-
-      // 외부 호스팅/모바일-PC 간 3초 주기 실시간 자동 동기화 폴링 + WebSocket 실시간 수신
+      // 안드로이드·아이폰(iOS)·PC 실시간 양방향 MQTT 브로커 연결 + 주기적 동기화
       useEffect(() => {
         if (hasCloudFirebase) return;
         pullSharedState();
 
-        // 실시간 WebSocket(GUN) 리스너: 스마트폰에서 가입 신청하는 즉시 대표님 PC 화면에 반영
-        if (gunDbNode) {
-          gunDbNode.get('members_json').on((rawStr) => {
-            if (!rawStr || typeof rawStr !== 'string') return;
+        const clients = [];
+        if (window.mqtt && typeof window.mqtt.connect === 'function') {
+          MQTT_BROKERS.forEach((brokerUrl) => {
             try {
-              const parsed = JSON.parse(rawStr);
-              if (parsed && Array.isArray(parsed.members)) {
-                setMembers(prev => {
-                  const merged = mergeMembersList(prev, parsed.members);
-                  saveMembersToLocal(merged);
-                  return merged;
-                });
-                setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
-                setSyncStatus('실시간 클라우드 연동됨');
-              }
-            } catch (e) {}
-          });
+              const client = window.mqtt.connect(brokerUrl, {
+                clean: true,
+                connectTimeout: 5000,
+                reconnectPeriod: 3000,
+                clientId: 'ent2103_' + Math.random().toString(16).substring(2, 10)
+              });
 
-          gunDbNode.get('records_json').on((rawStr) => {
-            if (!rawStr || typeof rawStr !== 'string') return;
-            try {
-              const parsed = JSON.parse(rawStr);
-              if (parsed && Array.isArray(parsed.records)) {
-                setRecords(prev => {
-                  const merged = mergeRecordsList(prev, parsed.records);
-                  saveRecordsToLocal(merged);
-                  return merged;
-                });
-              }
-            } catch (e) {}
+              client.on('connect', () => {
+                setSyncStatus('스마트폰·PC 실시간 연동중');
+                setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
+                client.subscribe([SYNC_CHANNEL_TOPIC, SYNC_PING_TOPIC], { qos: 1 });
+                // 접속 즉시 다른 기기들에게 최신 상태 요청
+                client.publish(SYNC_PING_TOPIC, JSON.stringify({ ts: Date.now() }));
+              });
+
+              client.on('message', (topic, payloadBuffer) => {
+                try {
+                  const text = payloadBuffer.toString();
+                  if (!text) return;
+                  const data = JSON.parse(text);
+
+                  if (topic === SYNC_PING_TOPIC) {
+                    // 다른 기기(또는 스마트폰/PC)가 접속해서 최신 상태를 요청하면 내 상태를 공유
+                    const curMems = membersRefState.current;
+                    const curRecs = recordsRefState.current;
+                    if (curMems.length > 1 || curRecs.length > 1) {
+                      const msg = JSON.stringify({
+                        updatedAt: Date.now(),
+                        members: curMems,
+                        records: curRecs.map(r => ({ ...r, attachments: (r.attachments || []).slice(0, 2) })),
+                        deletedMembers: Array.from(getDeletedMemberSet())
+                      });
+                      client.publish(SYNC_CHANNEL_TOPIC, msg, { qos: 1, retain: true });
+                    }
+                    return;
+                  }
+
+                  if (topic === SYNC_CHANNEL_TOPIC && data) {
+                    if (Array.isArray(data. deletedMembers)) {
+                      data.deletedMembers.forEach(k => addDeletedMemberKey(k));
+                    }
+                    if (Array.isArray(data.members) && data.members.length > 0) {
+                      setMembers(prev => {
+                        const merged = mergeMembersList(prev, data.members, data.deletedMembers);
+                        saveMembersToLocal(merged);
+                        return merged;
+                      });
+                    }
+                    if (Array.isArray(data.records) && data.records.length > 0) {
+                      setRecords(prev => {
+                        const merged = mergeRecordsList(prev, data.records);
+                        saveRecordsToLocal(merged);
+                        return merged;
+                      });
+                    }
+                    setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
+                    setSyncStatus('스마트폰·PC 실시간 연동중');
+                  }
+                } catch (err) {}
+              });
+
+              clients.push(client);
+            } catch (err) {}
           });
+          mqttClientsRef.current = clients;
         }
 
         const timer = setInterval(() => {
           pullSharedState();
-        }, 3000);
-        return () => clearInterval(timer);
+        }, 4000);
+
+        return () => {
+          clearInterval(timer);
+          clients.forEach(c => {
+            try { c.end(true); } catch (e) {}
+          });
+        };
       }, []);
 
       // 타 브라우저 탭 간 실시간 동기화 지원
@@ -678,6 +723,14 @@
                 const { id, ...rest } = item;
                 await addDoc(recordsRef, { ...rest, createdAt: serverTimestamp() });
               }
+            } else {
+              // 기존 샘플 고객(강서K병원 이외 초기 샘플 2~27번) 자동 정리
+              for (const d of snapRecords.docs) {
+                const rData = d.data();
+                if (rData.seq > 1 && rData.customer !== '강서K병원' && !rData.updatedAt) {
+                  await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', d.id));
+                }
+              }
             }
 
             const snapMembers = await getDocs(membersRef);
@@ -687,16 +740,16 @@
                 await addDoc(membersRef, { ...rest, createdAt: serverTimestamp() });
               }
             } else {
+              // 기존 샘플 회원(park, lee, jung, kim, admin) 자동 삭제 및 최고관리자(ent2103)만 유지
+              const legacyUsernames = ['park', 'lee', 'jung', 'kim', 'admin'];
+              for (const d of snapMembers.docs) {
+                const mData = d.data();
+                if (legacyUsernames.includes(mData.username)) {
+                  await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', d.id));
+                }
+              }
               const hasNewAdmin = snapMembers.docs.some(d => d.data().username === 'ent2103');
-              const oldAdminDoc = snapMembers.docs.find(d => d.data().username === 'admin');
-              if (oldAdminDoc && !hasNewAdmin) {
-                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', oldAdminDoc.id), {
-                  username: 'ent2103',
-                  password: 'ronaldono9!@',
-                  role: 'admin',
-                  status: 'approved'
-                });
-              } else if (!hasNewAdmin) {
+              if (!hasNewAdmin) {
                 const { id, ...adminData } = INITIAL_MEMBERS[0];
                 await addDoc(membersRef, { ...adminData, createdAt: serverTimestamp() });
               }
@@ -817,6 +870,10 @@
           return;
         }
 
+        const cleanId = username.trim();
+        // 만약 이전에 삭제되었던 아이디로 재가입 신청하는 경우 삭제 목록에서 해제
+        removeDeletedMemberKey(cleanId);
+
         // 최신 원격 회원목록을 먼저 받아와서 병합
         let baseMembers = membersRefState.current;
         if (!hasCloudFirebase) {
@@ -826,7 +883,6 @@
           }
         }
 
-        const cleanId = username.trim();
         const exists = baseMembers.some(m => m && m.username && m.username.toLowerCase() === cleanId.toLowerCase());
         if (exists) {
           setAuthNotice({
@@ -855,7 +911,7 @@
             const { id, ...cloudData } = newMemberObj;
             await addDoc(membersRef, { ...cloudData, createdAt: serverTimestamp() });
           } else {
-            // 로컬 및 클라우드에 즉시 강제 저장
+            // 안드로이드/iOS 로컬 및 클라우드 브로커에 즉시 강제 전송
             const nextMembers = mergeMembersList(baseMembers, [newMemberObj]);
             saveMembersToLocal(nextMembers);
             setMembers(nextMembers);
@@ -866,7 +922,7 @@
           setLoginForm({ username: cleanId, password: '' });
           setAuthNotice({
             type: 'success',
-            message: `[${newMemberObj.name}님 (아이디: ${cleanId})] 회원가입 승인 요청이 완료되었습니다! 총괄관리자(대표님) 화면 상단에 승인 요청이 실시간으로 표시됩니다.`
+            message: `[${newMemberObj.name}님 (아이디: ${cleanId})] 회원가입 승인 요청이 완료되었습니다! 대표님(최고관리자) 화면에 실시간으로 승인 요청이 전송되었습니다.`
           });
         } catch (error) {
           setAuthNotice({ type: 'error', message: '가입 신청 중 오류가 발생했습니다.' });
@@ -956,7 +1012,10 @@
           setMemberManageNotice('아이디와 이름을 입력해주세요.');
           return;
         }
-        const exists = members.some(m => m.username.toLowerCase() === newMemberDirectForm.username.trim().toLowerCase());
+        const cleanId = newMemberDirectForm.username.trim();
+        removeDeletedMemberKey(cleanId);
+
+        const exists = members.some(m => m.username.toLowerCase() === cleanId.toLowerCase());
         if (exists) {
           setMemberManageNotice('이미 등록된 아이디입니다.');
           return;
@@ -964,7 +1023,7 @@
 
         const newMem = {
           id: `mem_${Date.now()}`,
-          username: newMemberDirectForm.username.trim(),
+          username: cleanId,
           password: newMemberDirectForm.password.trim() || '1234',
           name: newMemberDirectForm.name.trim(),
           department: newMemberDirectForm.department.trim() || '구내공사 시공팀',
@@ -992,6 +1051,7 @@
       };
 
       const handleDeleteMember = async (memberId, username) => {
+        if (username) addDeletedMemberKey(username);
         if (hasCloudFirebase && db) {
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', memberId);
           await deleteDoc(docRef);
