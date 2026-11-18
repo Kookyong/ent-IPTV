@@ -56,6 +56,20 @@
     const STORAGE_KEY_FB_CONFIG = 'ent_iptv_fb_config_v6';
     const STORAGE_KEY_DELETED_MEMS = 'ent_iptv_deleted_members_v6';
     const STORAGE_KEY_DELETED_RECS = 'ent_iptv_deleted_records_v6';
+    const STORAGE_KEY_NOTICES = 'ent_iptv_notices_v6';
+
+    // 기본 공지사항 초기 데이터
+    const INITIAL_NOTICES = [
+      {
+        id: 'notice_1',
+        title: '[필독] 단체형 IPTV 구내공사 정산서류 및 현장사진 첨부 안내',
+        content: '개통 완료된 현장은 우측 관리란의 [첨부] 버튼을 눌러 현장 시공 사진과 정산 내역서(엑셀/PDF)를 반드시 등록해주시기 바랍니다.',
+        author: '대표님(총괄관리자)',
+        createdAt: '2024-04-24',
+        isImportant: true,
+        updatedAtMs: 1713916800000
+      }
+    ];
 
     // 스마트폰(Android/iOS) ⇄ PC 간 100% 실시간 동기화를 위한 다중 클라우드 채널
     const SYNC_CHANNEL_TOPIC = 'ent2103/iptv/sync/v6/state';
@@ -130,6 +144,19 @@
         }
       });
       return Array.from(map.values()).sort((a, b) => (Number(a.seq) || 9999) - (Number(b.seq) || 9999));
+    };
+
+    const mergeNoticesList = (localList = [], remoteList = []) => {
+      if (!remoteList || remoteList.length === 0) return localList;
+      const map = new Map();
+      [...localList, ...remoteList].forEach((n) => {
+        if (!n || !n.id) return;
+        const existing = map.get(n.id);
+        if (!existing || Number(n.updatedAtMs || 0) >= Number(existing.updatedAtMs || 0)) {
+          map.set(n.id, n);
+        }
+      });
+      return Array.from(map.values()).sort((a, b) => Number(b.updatedAtMs || 0) - Number(a.updatedAtMs || 0));
     };
 
     const getSavedFirebaseConfig = () => {
@@ -264,6 +291,29 @@
       const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
       const tableSectionRef = useRef(null);
 
+      // 1) 다중 선택 체크박스 상태
+      const [selectedIds, setSelectedIds] = useState([]);
+      const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
+
+      // 2) 고객명 클릭 시 상세정보 별도 모달 상태
+      const [detailRecordId, setDetailRecordId] = useState(null);
+
+      // 3) 공지사항 목록 및 관리자 입력/수정 모달 상태
+      const [notices, setNotices] = useState(() => {
+        try {
+          const saved = localStorage.getItem(STORAGE_KEY_NOTICES);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+          }
+        } catch (e) {}
+        return INITIAL_NOTICES;
+      });
+      const [isNoticeModalOpen, setIsNoticeModalOpen] = useState(false);
+      const [editingNoticeId, setEditingNoticeId] = useState(null);
+      const [noticeForm, setNoticeForm] = useState({ title: '', content: '', isImportant: true });
+      const [selectedNoticeView, setSelectedNoticeView] = useState(null);
+
       // Attachment Management States
       const [attachmentModalRecordId, setAttachmentModalRecordId] = useState(null);
       const [attachmentNotice, setAttachmentNotice] = useState({ type: '', message: '' });
@@ -313,9 +363,11 @@
       // 최신 상태 참조용 Ref & MQTT 클라이언트 Ref
       const membersRefState = useRef(members);
       const recordsRefState = useRef(records);
+      const noticesRefState = useRef(notices);
       const mqttClientsRef = useRef([]);
       useEffect(() => { membersRefState.current = members; }, [members]);
       useEffect(() => { recordsRefState.current = records; }, [records]);
+      useEffect(() => { noticesRefState.current = notices; }, [notices]);
 
       // 로그인 상태 변경 시 sessionStorage에 저장 (새로고침 F5 시에도 로그아웃되지 않고 유지됨)
       useEffect(() => {
@@ -341,8 +393,14 @@
         } catch (e) {}
       };
 
+      const saveNoticesToLocal = (list) => {
+        try {
+          localStorage.setItem(STORAGE_KEY_NOTICES, JSON.stringify(list));
+        } catch (e) {}
+      };
+
       // MQTT 실시간 브로커로 현재 상태를 브로드캐스트 (Retain 옵션 적용으로 나중에 켠 기기도 즉시 수신)
-      const broadcastViaMqtt = (recordsList, membersList) => {
+      const broadcastViaMqtt = (recordsList, membersList, noticesList) => {
         const lightRecords = (recordsList || []).map(r => ({
           ...r,
           attachments: (r.attachments || []).slice(0, 2)
@@ -351,6 +409,7 @@
           updatedAt: Date.now(),
           members: membersList || [],
           records: lightRecords,
+          notices: noticesList || noticesRefState.current || [],
           deletedMembers: Array.from(getDeletedMemberSet())
         });
 
@@ -366,19 +425,22 @@
         return sent;
       };
 
-      const pushSharedState = async (nextRecords, nextMembers) => {
+      const pushSharedState = async (nextRecords, nextMembers, nextNotices) => {
         const rList = nextRecords || recordsRefState.current;
         const mList = nextMembers || membersRefState.current;
+        const nList = nextNotices || noticesRefState.current;
         saveRecordsToLocal(rList);
         saveMembersToLocal(mList);
+        saveNoticesToLocal(nList);
 
-        if (hasCloudFirebase) return { records: rList, members: mList };
+        if (hasCloudFirebase) return { records: rList, members: mList, notices: nList };
 
         let mergedMembers = mList;
         let mergedRecords = rList;
+        let mergedNotices = nList;
 
         // 1) 안드로이드 / iOS / PC 즉시 동기화: MQTT Retained 메시지 즉시 발송
-        const mqttSent = broadcastViaMqtt(mergedRecords, mergedMembers);
+        const mqttSent = broadcastViaMqtt(mergedRecords, mergedMembers, mergedNotices);
 
         // 2) 백업 REST 클라우드 스토리지 병합 및 저장
         try {
@@ -391,16 +453,21 @@
             if (remoteData && Array.isArray(remoteData.records)) {
               mergedRecords = mergeRecordsList(mergedRecords, remoteData.records);
             }
+            if (remoteData && Array.isArray(remoteData.notices)) {
+              mergedNotices = mergeNoticesList(mergedNotices, remoteData.notices);
+            }
           }
         } catch (e) {}
 
         saveMembersToLocal(mergedMembers);
         saveRecordsToLocal(mergedRecords);
+        saveNoticesToLocal(mergedNotices);
         setMembers(mergedMembers);
         setRecords(mergedRecords);
+        setNotices(mergedNotices);
 
         // 병합된 최종본을 다시 한번 MQTT Retain + REST 서버에 저장
-        broadcastViaMqtt(mergedRecords, mergedMembers);
+        broadcastViaMqtt(mergedRecords, mergedMembers, mergedNotices);
 
         let restOk = false;
         try {
@@ -411,6 +478,7 @@
               updatedAt: Date.now(),
               records: mergedRecords,
               members: mergedMembers,
+              notices: mergedNotices,
               deletedMembers: Array.from(getDeletedMemberSet())
             })
           });
@@ -419,12 +487,13 @@
 
         setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
         setSyncStatus((mqttSent || restOk) ? '스마트폰·PC 실시간 연동중' : '기기 로컬 저장됨');
-        return { records: mergedRecords, members: mergedMembers };
+        return { records: mergedRecords, members: mergedMembers, notices: mergedNotices };
       };
 
       const pullSharedState = async () => {
         let currentMembers = membersRefState.current;
         let currentRecords = recordsRefState.current;
+        let currentNotices = noticesRefState.current;
         try {
           const localMem = JSON.parse(localStorage.getItem(STORAGE_KEY_MEMBERS) || '[]');
           if (Array.isArray(localMem) && localMem.length > 0) {
@@ -432,7 +501,7 @@
           }
         } catch (e) {}
 
-        if (hasCloudFirebase) return { members: currentMembers, records: currentRecords };
+        if (hasCloudFirebase) return { members: currentMembers, records: currentRecords, notices: currentNotices };
 
         // 다른 연결된 기기들에게 최신 상태 요청 핑 발송
         mqttClientsRef.current.forEach((client) => {
@@ -458,13 +527,18 @@
                 saveRecordsToLocal(currentRecords);
                 setRecords(currentRecords);
               }
+              if (Array.isArray(remoteData.notices) && remoteData.notices.length > 0) {
+                currentNotices = mergeNoticesList(currentNotices, remoteData.notices);
+                saveNoticesToLocal(currentNotices);
+                setNotices(currentNotices);
+              }
               setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
               setSyncStatus('스마트폰·PC 실시간 연동중');
             }
           }
         } catch (e) {}
 
-        return { members: currentMembers, records: currentRecords };
+        return { members: currentMembers, records: currentRecords, notices: currentNotices };
       };
 
       // --- Status Classification Helpers ---
@@ -620,6 +694,13 @@
                         return merged;
                       });
                     }
+                    if (Array.isArray(data.notices) && data.notices.length > 0) {
+                      setNotices(prev => {
+                        const merged = mergeNoticesList(prev, data.notices);
+                        saveNoticesToLocal(merged);
+                        return merged;
+                      });
+                    }
                     setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
                     setSyncStatus('스마트폰·PC 실시간 연동중');
                   }
@@ -652,6 +733,9 @@
           }
           if (e.key === STORAGE_KEY_MEMBERS && e.newValue) {
             try { setMembers(JSON.parse(e.newValue)); } catch (err) {}
+          }
+          if (e.key === STORAGE_KEY_NOTICES && e.newValue) {
+            try { setNotices(JSON.parse(e.newValue)); } catch (err) {}
           }
         };
         window.addEventListener('storage', handleStorageSync);
@@ -711,9 +795,11 @@
 
         const recordsRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_records');
         const membersRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_members');
+        const noticesRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_notices');
 
         let unsubRecords = null;
         let unsubMembers = null;
+        let unsubNotices = null;
 
         const seedAndListen = async () => {
           try {
@@ -755,6 +841,14 @@
               }
             }
 
+            const snapNotices = await getDocs(noticesRef);
+            if (snapNotices.empty) {
+              for (const n of INITIAL_NOTICES) {
+                const { id, ...rest } = n;
+                await addDoc(noticesRef, { ...rest, createdAtServer: serverTimestamp() });
+              }
+            }
+
             unsubRecords = onSnapshot(recordsRef, 
               (snapshot) => {
                 const fetchedRecords = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
@@ -774,6 +868,15 @@
               },
               (error) => console.error("Firestore members error:", error)
             );
+
+            unsubNotices = onSnapshot(noticesRef,
+              (snapshot) => {
+                const fetchedNotices = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+                fetchedNotices.sort((a, b) => Number(b.updatedAtMs || 0) - Number(a.updatedAtMs || 0));
+                setNotices(fetchedNotices);
+              },
+              (error) => console.error("Firestore notices error:", error)
+            );
           } catch (err) {
             console.error("Setup error:", err);
             setLoading(false);
@@ -784,6 +887,7 @@
         return () => {
           if (unsubRecords) unsubRecords();
           if (unsubMembers) unsubMembers();
+          if (unsubNotices) unsubNotices();
         };
       }, [user]);
 
@@ -1373,6 +1477,168 @@
         return records.find(r => r.id === attachmentModalRecordId) || null;
       }, [records, attachmentModalRecordId]);
 
+      // 고객명 클릭 시 상세정보 모달용 활성 레코드
+      const activeDetailRecord = useMemo(() => {
+        if (!detailRecordId) return null;
+        return records.find(r => r.id === detailRecordId) || null;
+      }, [records, detailRecordId]);
+
+      // --- 다중 체크박스 선택 핸들러 ---
+      const isAllFilteredSelected = useMemo(() => {
+        if (filteredRecords.length === 0) return false;
+        return filteredRecords.every(r => selectedIds.includes(r.id));
+      }, [filteredRecords, selectedIds]);
+
+      const handleToggleSelectAll = () => {
+        if (isAllFilteredSelected) {
+          const filteredIdSet = new Set(filteredRecords.map(r => r.id));
+          setSelectedIds(prev => prev.filter(id => !filteredIdSet.has(id)));
+        } else {
+          const nextSet = new Set([...selectedIds, ...filteredRecords.map(r => r.id)]);
+          setSelectedIds(Array.from(nextSet));
+        }
+      };
+
+      const handleToggleSelectRow = (id) => {
+        setSelectedIds(prev =>
+          prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+        );
+      };
+
+      // 다중 선택 항목 일괄 정산상태(비고) 변경
+      const handleBulkStatusChange = async (newStatus) => {
+        if (!newStatus || selectedIds.length === 0) return;
+        const targetSet = new Set(selectedIds);
+        if (hasCloudFirebase && db) {
+          for (const id of selectedIds) {
+            const rec = records.find(r => r.id === id);
+            if (rec && isOwnedByCurrentMember(rec)) {
+              const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', id);
+              await updateDoc(docRef, { remarks: newStatus, updatedAt: serverTimestamp() });
+            }
+          }
+        } else {
+          const nextRecords = records.map(r =>
+            targetSet.has(r.id) && isOwnedByCurrentMember(r)
+              ? { ...r, remarks: newStatus, updatedAtMs: Date.now() }
+              : r
+          );
+          setRecords(nextRecords);
+          await pushSharedState(nextRecords, members, notices);
+        }
+      };
+
+      // 다중 선택 항목 일괄 삭제 (삭제 후 No. 1부터 자동 재정렬)
+      const handleBulkDelete = async () => {
+        if (selectedIds.length === 0) return;
+        const targetSet = new Set(selectedIds);
+
+        try {
+          const delRecSet = new Set(JSON.parse(localStorage.getItem(STORAGE_KEY_DELETED_RECS) || '[]'));
+          selectedIds.forEach(id => delRecSet.add(String(id)));
+          localStorage.setItem(STORAGE_KEY_DELETED_RECS, JSON.stringify(Array.from(delRecSet)));
+        } catch (e) {}
+
+        const remainingRecords = records
+          .filter(r => !(targetSet.has(r.id) && isOwnedByCurrentMember(r)))
+          .sort((a, b) => (Number(a.seq) || 9999) - (Number(b.seq) || 9999))
+          .map((r, idx) => ({
+            ...r,
+            seq: idx + 1,
+            updatedAtMs: Date.now()
+          }));
+
+        if (hasCloudFirebase && db) {
+          for (const id of selectedIds) {
+            const rec = records.find(r => r.id === id);
+            if (rec && isOwnedByCurrentMember(rec)) {
+              await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', id));
+            }
+          }
+          for (const rec of remainingRecords) {
+            if (rec.id) {
+              const rRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', rec.id);
+              await updateDoc(rRef, { seq: rec.seq, updatedAt: serverTimestamp() });
+            }
+          }
+        } else {
+          setRecords(remainingRecords);
+          await pushSharedState(remainingRecords, members, notices);
+        }
+
+        setSelectedIds([]);
+        setBulkDeleteConfirmOpen(false);
+      };
+
+      // --- 공지사항 등록 / 수정 / 삭제 핸들러 (관리자 이상 권한자 전용) ---
+      const handleOpenNoticeForm = (notice = null) => {
+        if (!isAdmin) return;
+        if (notice) {
+          setEditingNoticeId(notice.id);
+          setNoticeForm({
+            title: notice.title || '',
+            content: notice.content || '',
+            isImportant: Boolean(notice.isImportant)
+          });
+        } else {
+          setEditingNoticeId(null);
+          setNoticeForm({ title: '', content: '', isImportant: true });
+        }
+        setIsNoticeModalOpen(true);
+      };
+
+      const handleSaveNotice = async (e) => {
+        e.preventDefault();
+        if (!isAdmin || !noticeForm.title.trim()) return;
+
+        const nowDate = new Date().toISOString().slice(0, 10);
+        const payload = {
+          title: noticeForm.title.trim(),
+          content: noticeForm.content.trim(),
+          isImportant: Boolean(noticeForm.isImportant),
+          author: currentMember?.name || '관리자',
+          createdAt: nowDate,
+          updatedAtMs: Date.now()
+        };
+
+        if (hasCloudFirebase && db) {
+          const noticesRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_notices');
+          if (editingNoticeId) {
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_notices', editingNoticeId);
+            await updateDoc(docRef, payload);
+          } else {
+            await addDoc(noticesRef, { ...payload, createdAtServer: serverTimestamp() });
+          }
+        } else {
+          let nextNotices;
+          if (editingNoticeId) {
+            nextNotices = notices.map(n => n.id === editingNoticeId ? { ...n, ...payload } : n);
+          } else {
+            nextNotices = [{ id: `notice_${Date.now()}`, ...payload }, ...notices];
+          }
+          setNotices(nextNotices);
+          await pushSharedState(records, members, nextNotices);
+        }
+
+        setIsNoticeModalOpen(false);
+        setEditingNoticeId(null);
+        setNoticeForm({ title: '', content: '', isImportant: true });
+      };
+
+      const handleDeleteNotice = async (noticeId) => {
+        if (!isAdmin) return;
+        if (hasCloudFirebase && db) {
+          await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'iptv_notices', noticeId));
+        } else {
+          const nextNotices = notices.filter(n => n.id !== noticeId);
+          setNotices(nextNotices);
+          await pushSharedState(records, members, nextNotices);
+        }
+        if (selectedNoticeView && selectedNoticeView.id === noticeId) {
+          setSelectedNoticeView(null);
+        }
+      };
+
       const handleCloseModal = () => {
         setIsModalOpen(false);
         setFormData(DEFAULT_FORM);
@@ -1714,7 +1980,7 @@
       }
 
       return (
-        <div className="min-h-screen bg-slate-100 flex flex-col">
+        <div className="min-h-screen bg-slate-100 font-sans text-slate-800 flex flex-col">
           {/* Header */}
           <header className="bg-slate-900 text-white shadow-md z-10 sticky top-0">
             <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
@@ -1724,11 +1990,22 @@
                 </div>
                 <div>
                   <h1 className="text-base sm:text-xl font-bold tracking-wide">(주)이앤티 단체형IPTV구내공사 관리시스템</h1>
-                  <p className="text-xs text-slate-400 hidden sm:block">LGU+ 구내통신 및 단체형 IPTV 개통·정산 통합 전산망</p>
+                  <span className="text-xs text-slate-400 hidden sm:block">LGU+ 구내통신 및 단체형 IPTV 개통·정산 통합 전산망</span>
                 </div>
               </div>
 
               <div className="flex items-center flex-wrap gap-2 sm:gap-3">
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenNoticeForm(null)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-colors shadow-sm"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>공지사항 등록</span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => setIsShareModalOpen(true)}
@@ -1842,6 +2119,111 @@
                 </div>
               </div>
             )}
+
+            {/* 전사 공지사항 보드 (모든 직원 열람 가능 / 관리자 이상 등록·수정·삭제 가능) */}
+            <div className="bg-white rounded-xl shadow-sm border border-amber-300/80 overflow-hidden">
+              <div className="bg-gradient-to-r from-amber-500/15 via-amber-50 to-white px-4 py-2.5 border-b border-amber-200 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 bg-amber-500 text-slate-950 rounded text-xs font-extrabold flex items-center gap-1">
+                    📢 공지사항 ({notices.length})
+                  </span>
+                  <span className="text-xs text-slate-600 font-medium">
+                    제목을 클릭하면 상세 공지 내용을 확인할 수 있습니다.
+                  </span>
+                </div>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenNoticeForm(null)}
+                    className="inline-flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-bold bg-slate-900 hover:bg-slate-800 text-amber-300 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> 새 공지사항 작성
+                  </button>
+                )}
+              </div>
+
+              {notices.length === 0 ? (
+                <div className="px-4 py-3 text-xs text-slate-400 flex items-center justify-between">
+                  <span>등록된 공지사항이 없습니다.</span>
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {notices.map((notice) => (
+                    <div
+                      key={notice.id}
+                      className="px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-amber-50/40 transition-colors"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setSelectedNoticeView(selectedNoticeView?.id === notice.id ? null : notice)}
+                        className="text-left flex items-center gap-2 min-w-0 flex-1"
+                      >
+                        {notice.isImportant ? (
+                          <span className="px-1.5 py-0.5 bg-red-100 text-red-700 border border-red-200 rounded text-[10px] font-extrabold shrink-0">
+                            중요공지
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[10px] font-bold shrink-0">
+                            일반
+                          </span>
+                        )}
+                        <span className="text-xs sm:text-sm font-bold text-slate-900 truncate hover:text-blue-600 underline-offset-2 hover:underline">
+                          {notice.title}
+                        </span>
+                      </button>
+
+                      <div className="flex items-center gap-2 shrink-0 text-xs text-slate-500">
+                        <span className="font-medium text-slate-600">{notice.author || '관리자'}</span>
+                        <span>·</span>
+                        <span className="font-mono">{notice.createdAt}</span>
+                        {isAdmin && (
+                          <div className="flex items-center gap-1 ml-2">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenNoticeForm(notice)}
+                              className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-[11px] font-bold"
+                            >
+                              수정
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteNotice(notice.id)}
+                              className="px-2 py-0.5 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded text-[11px] font-bold"
+                            >
+                              삭제
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 클릭한 공지사항 상세 보기 영역 */}
+              {selectedNoticeView && (
+                <div className="px-5 py-4 bg-amber-50/60 border-t border-amber-200 text-xs sm:text-sm space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="font-extrabold text-slate-900 flex items-center gap-2">
+                      <span>📌 {selectedNoticeView.title}</span>
+                      <span className="text-xs font-normal text-slate-500">
+                        ({selectedNoticeView.author} · {selectedNoticeView.createdAt})
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedNoticeView(null)}
+                      className="text-xs font-bold text-slate-500 hover:text-slate-800"
+                    >
+                      닫기 ✕
+                    </button>
+                  </div>
+                  <p className="text-slate-700 whitespace-pre-line leading-relaxed bg-white p-3.5 rounded-lg border border-amber-200/80">
+                    {selectedNoticeView.content || '내용 없음'}
+                  </p>
+                </div>
+              )}
+            </div>
 
             {/* Dashboard Cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -2015,6 +2397,45 @@
                   </button>
                 </div>
               </div>
+
+              {/* 다중 선택 시 나타나는 일괄 작업 컨트롤 바 */}
+              {selectedIds.length > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-blue-200 bg-blue-50/70 -mx-4 -mb-4 px-4 py-3 rounded-b-xl">
+                  <div className="flex items-center gap-2 text-xs sm:text-sm font-extrabold text-blue-900">
+                    <span className="px-2.5 py-1 bg-blue-600 text-white rounded-full text-xs">
+                      {selectedIds.length}건 선택됨
+                    </span>
+                    <span>선택한 내역을 일괄 변경하거나 삭제할 수 있습니다.</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold text-slate-700">일괄 상태변경:</span>
+                    {REMARKS_STATUS_LIST.map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        onClick={() => handleBulkStatusChange(st)}
+                        className={`px-2.5 py-1 rounded text-xs font-bold border transition-colors ${getRemarksBadgeStyle(st)}`}
+                      >
+                        {st}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setBulkDeleteConfirmOpen(true)}
+                      className="ml-2 px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-sm"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> 선택 삭제 ({selectedIds.length}건)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIds([])}
+                      className="px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-600 border border-slate-300 rounded-lg text-xs font-bold"
+                    >
+                      선택 해제
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Table */}
@@ -2023,6 +2444,15 @@
                 <table className="min-w-max w-full text-left text-xs sm:text-sm whitespace-nowrap border-collapse">
                   <thead className="bg-slate-200/80 text-slate-800 border-b-2 border-slate-300">
                     <tr>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300 w-10">
+                        <input
+                          type="checkbox"
+                          checked={isAllFilteredSelected}
+                          onChange={handleToggleSelectAll}
+                          className="w-4 h-4 text-blue-600 rounded border-slate-400 cursor-pointer"
+                          title="전체 선택 / 해제"
+                        />
+                      </th>
                       <th className="px-2.5 py-3 font-bold text-center border-r border-slate-300">No.</th>
                       <th className="px-3 py-3 font-bold text-center border-r border-slate-300">구내공사(업체명)</th>
                       <th className="px-3 py-3 font-bold text-center border-r border-slate-300 bg-indigo-50/70">구분(직원명)</th>
@@ -2046,8 +2476,17 @@
                     {filteredRecords.map((record, index) => {
                       const effectiveUnitPrice = getEffectiveUnitPrice(record);
                       const totalRowPrice = getRecordTotalPrice(record);
+                      const isSelected = selectedIds.includes(record.id);
                       return (
-                        <tr key={record.id} className={`${record.isHighlighted ? 'bg-yellow-100/90' : 'hover:bg-blue-50/40 even:bg-slate-50/50'}`}>
+                        <tr key={record.id} className={`${isSelected ? 'bg-blue-100/70' : record.isHighlighted ? 'bg-yellow-100/90' : 'hover:bg-blue-50/40 even:bg-slate-50/50'}`}>
+                          <td className="px-3 py-2.5 text-center border-r border-slate-200">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => handleToggleSelectRow(record.id)}
+                              className="w-4 h-4 text-blue-600 rounded border-slate-300 cursor-pointer"
+                            />
+                          </td>
                           <td className="px-2.5 py-2.5 text-center font-bold text-slate-600 border-r border-slate-200">{index + 1}</td>
                           <td className="px-3 py-2.5 text-center border-r border-slate-200 font-bold text-blue-800">{record.company}</td>
                           <td className="px-3 py-2.5 text-center border-r border-slate-200 font-bold text-indigo-900 bg-indigo-50/20">{record.staffName || '미지정'}</td>
@@ -2055,7 +2494,17 @@
                           <td className="px-3 py-2.5 text-center border-r border-slate-200">{record.branch || '-'}</td>
                           <td className="px-3 py-2.5 text-center border-r border-slate-200 font-medium">{record.manager || '-'}</td>
                           <td className="px-3 py-2.5 text-center font-mono border-r border-slate-200">{isMasked ? maskPhone(record.contact) : (record.contact || '-')}</td>
-                          <td className="px-3 py-2.5 font-bold text-slate-900 border-r border-slate-200">{record.customer}</td>
+                          <td className="px-3 py-2.5 font-bold text-slate-900 border-r border-slate-200">
+                            <button
+                              type="button"
+                              onClick={() => setDetailRecordId(record.id)}
+                              className="text-left font-extrabold text-blue-700 hover:text-blue-900 hover:underline flex items-center gap-1.5 group"
+                              title="클릭하여 고객 상세정보 창 열기"
+                            >
+                              <span>{record.customer}</span>
+                              <Eye className="w-3.5 h-3.5 text-blue-400 group-hover:text-blue-700 shrink-0" />
+                            </button>
+                          </td>
                           <td className="px-3 py-2.5 text-center font-mono font-semibold text-blue-900 bg-blue-50/20 border-r border-slate-200">{isMasked ? maskSubNumber(record.subNumber) : (record.subNumber || '-')}</td>
                           <td className="px-3 py-2.5 text-slate-700 border-r border-slate-200 max-w-xs truncate">{isMasked ? maskAddress(record.address) : record.address}</td>
                           <td className="px-3 py-2.5 text-center font-bold border-r border-slate-200">{record.lines}</td>
@@ -2613,6 +3062,270 @@
                       {copySuccess ? '복사 완료!' : '직원 단톡방 공지문구 복사하기'}
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 고객명 클릭 시 띄워지는 상세정보 별도 모달창 */}
+          {activeDetailRecord && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden my-8 border border-slate-200">
+                <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-lg bg-blue-500/20 border border-blue-400/30 text-blue-300">
+                      <Building2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-base sm:text-lg font-extrabold">{activeDetailRecord.customer}</h3>
+                        <span className={`px-2 py-0.5 rounded text-xs font-bold border ${getRemarksBadgeStyle(activeDetailRecord.remarks)}`}>
+                          {activeDetailRecord.remarks || '개통예정'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400">고객 상세 구내공사 내역 및 정산·첨부파일 정보</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setDetailRecordId(null)}
+                    className="text-slate-400 hover:text-white p-1 rounded-full hover:bg-slate-800"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="p-6 space-y-5 text-xs sm:text-sm">
+                  {/* 핵심 요약 카드 */}
+                  <div className="grid grid-cols-3 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                    <div>
+                      <span className="text-xs text-slate-500 block">총 개통 회선수</span>
+                      <span className="text-lg font-extrabold text-slate-900">{activeDetailRecord.lines} 회선</span>
+                    </div>
+                    <div>
+                      <span className="text-xs text-slate-500 block">적용 단가 {activeDetailRecord.isDifficult ? '(난개통 포함)' : '(기본)'}</span>
+                      <span className="text-lg font-mono font-extrabold text-blue-700">
+                        {getEffectiveUnitPrice(activeDetailRecord).toLocaleString()}원
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-xs text-slate-500 block">총 정산금액</span>
+                      <span className="text-lg font-mono font-extrabold text-emerald-700">
+                        {getRecordTotalPrice(activeDetailRecord).toLocaleString()}원
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* 상세 필드 테이블 */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 border border-slate-200 rounded-xl p-4 bg-white">
+                    <div className="flex justify-between py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">구내공사(업체명)</span>
+                      <span className="font-bold text-blue-800">{activeDetailRecord.company}</span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">구분(담당 직원)</span>
+                      <span className="font-bold text-indigo-900">{activeDetailRecord.staffName || '-'}</span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">공사구분</span>
+                      <span className="font-bold text-emerald-800">{activeDetailRecord.workType || '단체형IPTV'}</span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">가입번호</span>
+                      <span className="font-mono font-bold text-blue-900">
+                        {isMasked ? maskSubNumber(activeDetailRecord.subNumber) : (activeDetailRecord.subNumber || '-')}
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">유치점 / 유치자</span>
+                      <span className="font-bold text-slate-800">
+                        {activeDetailRecord.branch || '-'} / {activeDetailRecord.manager || '-'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">연락처</span>
+                      <span className="font-mono font-bold text-slate-800">
+                        {isMasked ? maskPhone(activeDetailRecord.contact) : (activeDetailRecord.contact || '-')}
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">개통예정일</span>
+                      <span className="font-bold text-slate-800">{activeDetailRecord.scheduledDate || '-'}</span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">난개통 여부</span>
+                      <span className={`font-bold ${activeDetailRecord.isDifficult ? 'text-orange-600' : 'text-slate-500'}`}>
+                        {activeDetailRecord.isDifficult ? '난개통 적용 (+10,000원)' : '일반 개통'}
+                      </span>
+                    </div>
+                    <div className="sm:col-span-2 flex flex-col gap-1 py-2 border-b border-slate-100">
+                      <span className="text-slate-500 font-semibold">설치 주소</span>
+                      <span className="font-bold text-slate-900 bg-slate-50 px-3 py-2 rounded-lg">
+                        {isMasked ? maskAddress(activeDetailRecord.address) : (activeDetailRecord.address || '-')}
+                      </span>
+                    </div>
+                    <div className="sm:col-span-2 flex flex-col gap-1 pt-1">
+                      <span className="text-slate-500 font-semibold">추가 메모 / 특이사항</span>
+                      <span className="text-slate-800 bg-slate-50 px-3 py-2 rounded-lg">
+                        {activeDetailRecord.extraNote || '등록된 추가 메모가 없습니다.'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* 첨부파일 바로가기 섹션 */}
+                  <div className="flex items-center justify-between p-3.5 rounded-xl bg-blue-50/70 border border-blue-200">
+                    <div className="flex items-center gap-2">
+                      <Paperclip className="w-4 h-4 text-blue-600" />
+                      <span className="font-bold text-blue-950">
+                        첨부된 파일 ({(activeDetailRecord.attachments || []).length}건)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetId = activeDetailRecord.id;
+                        setDetailRecordId(null);
+                        setAttachmentModalRecordId(targetId);
+                      }}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold"
+                    >
+                      사진·엑셀·PDF 첨부파일 열기 →
+                    </button>
+                  </div>
+                </div>
+
+                <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center">
+                  <button
+                    type="button"
+                    onClick={handleToggleMask}
+                    className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 flex items-center gap-1"
+                  >
+                    {isMasked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+                    <span>{isMasked ? '마스킹 해제' : '마스킹 잠금'}</span>
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const rec = activeDetailRecord;
+                        setDetailRecordId(null);
+                        handleOpenModal(rec);
+                      }}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-bold rounded-lg flex items-center gap-1.5"
+                    >
+                      <Edit2 className="w-4 h-4" /> 정보 수정하기
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDetailRecordId(null)}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs sm:text-sm font-bold rounded-lg"
+                    >
+                      닫기
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 관리자 전용 공지사항 등록 / 수정 모달 */}
+          {isNoticeModalOpen && isAdmin && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden my-8 border border-slate-200">
+                <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+                  <h3 className="text-base sm:text-lg font-bold flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-amber-400" />
+                    <span>{editingNoticeId ? '공지사항 수정 (관리자)' : '신규 공지사항 등록 (관리자)'}</span>
+                  </h3>
+                  <button
+                    onClick={() => setIsNoticeModalOpen(false)}
+                    className="text-slate-400 hover:text-white p-1 rounded-full"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <form onSubmit={handleSaveNotice} className="p-6 space-y-4 text-xs sm:text-sm">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">공지 제목 *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="예: [필독] 5월 단체형IPTV 정산서류 마감 안내"
+                      value={noticeForm.title}
+                      onChange={(e) => setNoticeForm({ ...noticeForm, title: e.target.value })}
+                      className="w-full px-3.5 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none font-bold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">공지 상세 내용</label>
+                    <textarea
+                      rows="5"
+                      placeholder="전 직원에게 전달할 상세 공지사항 내용을 입력하세요..."
+                      value={noticeForm.content}
+                      onChange={(e) => setNoticeForm({ ...noticeForm, content: e.target.value })}
+                      className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none leading-relaxed"
+                    />
+                  </div>
+
+                  <label className="flex items-center gap-2 cursor-pointer select-none px-3.5 py-2.5 rounded-lg bg-red-50 border border-red-200">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(noticeForm.isImportant)}
+                      onChange={(e) => setNoticeForm({ ...noticeForm, isImportant: e.target.checked })}
+                      className="w-4 h-4 text-red-600 rounded"
+                    />
+                    <span className="text-xs font-extrabold text-red-800">[중요공지] 배지 표시하기</span>
+                  </label>
+
+                  <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setIsNoticeModalOpen(false)}
+                      className="px-4 py-2 border border-slate-300 rounded-lg font-semibold text-slate-700 hover:bg-slate-50"
+                    >
+                      취소
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow-sm"
+                    >
+                      {editingNoticeId ? '공지 수정 저장' : '공지사항 등록'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* 다중 선택 일괄 삭제 확인 모달 */}
+          {bulkDeleteConfirmOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+              <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-6 text-center">
+                <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto mb-3">
+                  <Trash2 className="w-6 h-6" />
+                </div>
+                <h3 className="text-base font-extrabold text-slate-900 mb-1">
+                  선택한 {selectedIds.length}건을 일괄 삭제하시겠습니까?
+                </h3>
+                <p className="text-xs text-slate-500 mb-5">
+                  삭제 후 남은 내역들의 순번(No.)은 1번부터 순서대로 자동 재정렬됩니다.
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setBulkDeleteConfirmOpen(false)}
+                    className="flex-1 py-2 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBulkDelete}
+                    className="flex-1 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold"
+                  >
+                    일괄 삭제 실행
+                  </button>
                 </div>
               </div>
             </div>
