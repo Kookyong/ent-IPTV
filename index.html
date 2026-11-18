@@ -1430,13 +1430,37 @@
       const handleDelete = async (id) => {
         const targetRecord = records.find(r => r.id === id);
         if (targetRecord && !isOwnedByCurrentMember(targetRecord)) return;
+
+        // 삭제된 레코드가 클라우드 동기화 시 다시 살아나지 않도록 삭제 이력 기록
+        try {
+          const delRecSet = new Set(JSON.parse(localStorage.getItem(STORAGE_KEY_DELETED_RECS) || '[]'));
+          delRecSet.add(String(id));
+          localStorage.setItem(STORAGE_KEY_DELETED_RECS, JSON.stringify(Array.from(delRecSet)));
+        } catch (e) {}
+
+        // 삭제 후 남은 데이터들의 No.(seq)를 1번부터 순서대로 자동 재정렬
+        const remainingRecords = records
+          .filter(r => r.id !== id)
+          .sort((a, b) => (Number(a.seq) || 9999) - (Number(b.seq) || 9999))
+          .map((r, idx) => ({
+            ...r,
+            seq: idx + 1,
+            updatedAtMs: Date.now()
+          }));
+
         if (hasCloudFirebase && db) {
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', id);
           await deleteDoc(docRef);
+          // 남은 문서들의 순번(seq)도 1부터 순서대로 업데이트
+          for (const rec of remainingRecords) {
+            if (rec.id) {
+              const rRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', rec.id);
+              await updateDoc(rRef, { seq: rec.seq, updatedAt: serverTimestamp() });
+            }
+          }
         } else {
-          const nextRecords = records.filter(r => r.id !== id);
-          setRecords(nextRecords);
-          await pushSharedState(nextRecords, members);
+          setRecords(remainingRecords);
+          await pushSharedState(remainingRecords, members);
         }
         setDeleteConfirmId(null);
       };
@@ -1474,7 +1498,7 @@
       const handleExportCSV = () => {
         const headers = ['순번', '구내공사(업체명)', '구분(직원명)', '공사구분', '유치점', '유치자', '연락처', '고객명', '가입번호', '주소', '회선수', '기본단가', '난개통(+10,000)', '적용단가', '총정산금액', '개통예정일', '비고', '추가메모'];
         const rows = filteredRecords.map((r, index) => [
-          r.seq || (index + 1),
+          index + 1,
           r.company || '',
           r.staffName || '-',
           r.workType || '단체형IPTV',
@@ -2024,7 +2048,7 @@
                       const totalRowPrice = getRecordTotalPrice(record);
                       return (
                         <tr key={record.id} className={`${record.isHighlighted ? 'bg-yellow-100/90' : 'hover:bg-blue-50/40 even:bg-slate-50/50'}`}>
-                          <td className="px-2.5 py-2.5 text-center font-medium text-slate-500 border-r border-slate-200">{record.seq || (index + 1)}</td>
+                          <td className="px-2.5 py-2.5 text-center font-bold text-slate-600 border-r border-slate-200">{index + 1}</td>
                           <td className="px-3 py-2.5 text-center border-r border-slate-200 font-bold text-blue-800">{record.company}</td>
                           <td className="px-3 py-2.5 text-center border-r border-slate-200 font-bold text-indigo-900 bg-indigo-50/20">{record.staffName || '미지정'}</td>
                           <td className="px-3 py-2.5 text-center border-r border-slate-200 font-bold text-emerald-800">{record.workType || '단체형IPTV'}</td>
