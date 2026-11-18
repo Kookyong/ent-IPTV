@@ -1,0 +1,1608 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>(주)이앤티 단체형IPTV구내공사 관리시스템</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Pretendard / Inter Font -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" />
+  <style>
+    body {
+      font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+    }
+  </style>
+  <!-- Import Map for React, Lucide Icons, and Firebase -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.363.0?deps=react@18.2.0",
+        "firebase/app": "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"
+      }
+    }
+  </script>
+  <!-- Babel Standalone for JSX compilation in Browser -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    import React, { useState, useEffect, useMemo, useRef } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { 
+      Search, Plus, Edit2, Trash2, Building2, User, Phone, MapPin, 
+      Calendar, FileText, Check, X, AlertCircle, Lock, Unlock, Key, 
+      Hash, Download, Star, RefreshCw, Layers, CheckCircle2, Clock,
+      UserPlus, LogIn, LogOut, ShieldCheck, Users, UserCheck, UserX,
+      Paperclip, Image, FileSpreadsheet, Upload, Eye, Share2, Copy, Globe, Smartphone
+    } from 'lucide-react';
+    import { initializeApp } from 'firebase/app';
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+    import { getFirestore, doc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, serverTimestamp, getDocs } from 'firebase/firestore';
+
+    // 1. Firebase Initialization (Canvas 클라우드 환경 + 외부 GitHub/Vercel 단독 호스팅 환경 모두 자동 호환)
+    const rawFirebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const hasCloudFirebase = Boolean(rawFirebaseConfig && rawFirebaseConfig.apiKey);
+    let app = null;
+    let auth = null;
+    let db = null;
+    if (hasCloudFirebase) {
+      try {
+        app = initializeApp(rawFirebaseConfig);
+        auth = getAuth(app);
+        db = getFirestore(app);
+      } catch (e) {
+        console.warn("Firebase init fallback:", e);
+      }
+    }
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+    // 담당 직원(구분) 목록 및 업체명 목록
+    const STAFF_LIST = ['박국용', '박정훈', '오세웅', '서진섭', '김경민', '이근', '하형준', '손민아'];
+    const COMPANY_LIST = ['(주)이앤티', '㈜온파워아이앤티'];
+    const WORK_TYPE_LIST = ['단체형IPTV'];
+    const REMARKS_STATUS_LIST = ['개통예정', '개통완료', '정산완료', '보류', '취소'];
+    const BASE_UNIT_PRICE = 35000;
+    const DIFFICULT_EXTRA_PRICE = 10000;
+
+    // 엑셀 시트 기반 27개 초기 데이터
+    const INITIAL_DATA = [
+      { id: 'rec_1', seq: 1, staffName: '박국용', subNumber: '500-2404-1001', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '디컴스', manager: '이대운', contact: '010-6776-5602', customer: '강서K병원', address: '서울 강서구 화곡동 377-8', lines: 19, scheduledDate: '2024-04-24', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_2', seq: 2, staffName: '박정훈', subNumber: '500-2404-1002', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '아모레미오 클래식점(휴먼터치 1호점)', address: '수원시팔달구 향교로 3번길 36', lines: 60, scheduledDate: '2024-04-24', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_3', seq: 3, staffName: '오세웅', subNumber: '500-2404-1003', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '아모레미오 빈티지점(휴먼터치2호점)', address: '수원시팔달구 향교로 3번길 36', lines: 33, scheduledDate: '2024-04-25', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_4', seq: 4, staffName: '서진섭', subNumber: '500-2404-1004', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 델컴스', manager: '이승재', contact: '010-5768-3122', customer: '인성금오요양원', address: '수원시 장안구 정조로 992번길 15-7', lines: 2, scheduledDate: '2024-04-24', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_5', seq: 5, staffName: '김경민', subNumber: '500-2405-1005', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '젤라', address: '서울 강북구 미아동 189-1', lines: 16, scheduledDate: '2024-05-29', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_6', seq: 6, staffName: '이근', subNumber: '500-2405-1006', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '신정형외과의원', address: '경기도 고양시 덕양구 행신동 616-1', lines: 9, scheduledDate: '2024-05-14', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_7', seq: 7, staffName: '하형준', subNumber: '500-2405-1007', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜온파워네트웍스', manager: '', contact: '', customer: '늘사랑실버케어센터', address: '경기도 남양주시 평내동 579', lines: 1, scheduledDate: '2024-05-22', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_8', seq: 8, staffName: '손민아', subNumber: '500-2405-1008', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜지디네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '세아빌1', address: '서울시 동대문구 무학로35길 19', lines: 16, scheduledDate: '2024-05-31', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_9', seq: 9, staffName: '박국용', subNumber: '500-2405-1009', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜지디네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '세아빌2', address: '서울시 동대문구 천호대로13길 59-3', lines: 12, scheduledDate: '2024-05-31', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_10', seq: 10, staffName: '박정훈', subNumber: '500-2406-1010', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '레지던스어울림계양구청점', address: '인천광역시 계양구 오조산로57번길 11-1', lines: 54, scheduledDate: '2024-06-27', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_11', seq: 11, staffName: '오세웅', subNumber: '500-2406-1011', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '문스테이션호점', address: '서울 강동구 천호동 295-31', lines: 47, scheduledDate: '2024-06-27', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_12', seq: 12, staffName: '서진섭', subNumber: '500-2406-1012', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜지디네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '이효국', address: '서울 강남구 개포동 1218-20', lines: 15, scheduledDate: '2024-06-28', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_13', seq: 13, staffName: '김경민', subNumber: '500-2407-1013', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '반포동앤드원스테이', address: '서초구 반포동 54-12 3층', lines: 32, scheduledDate: '2024-07-25', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_14', seq: 14, staffName: '이근', subNumber: '500-2407-1014', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '자양한방병원', address: '연수구 신송로 154 4층', lines: 40, scheduledDate: '2024-07-26', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_15', seq: 15, staffName: '하형준', subNumber: '500-2407-1015', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '대원장모텔', address: '인천 중구 반달로 9번길 21', lines: 16, scheduledDate: '2024-07-30', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_16', seq: 16, staffName: '손민아', subNumber: '500-2408-1016', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '비플', manager: '이병렬', contact: '010-7179-5750', customer: '한마음외과의원', address: '권선구 경수대로 321', lines: 14, scheduledDate: '2024-08-01', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_17', seq: 17, staffName: '박국용', subNumber: '500-2408-1017', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '싱글하우스', address: '일산로 143, 5층 (백석동1146, 형진빌딩)', lines: 28, scheduledDate: '2024-08-13', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_18', seq: 18, staffName: '박정훈', subNumber: '500-2408-1018', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '㈜온파워네트웍스', manager: '', contact: '', customer: '살렘요양원', address: '파주시 방촌로 548번길 40-3', lines: 1, scheduledDate: '2024-08-13', remarks: '정산서류제출완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_19', seq: 19, staffName: '오세웅', subNumber: '500-2408-1019', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '비플', manager: '이병렬', contact: '010-8408-0720', customer: '굿모닝노인전문요양원', address: '평택시 현덕면 현덕로 1095-5', lines: 12, scheduledDate: '2024-08-21', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_20', seq: 20, staffName: '서진섭', subNumber: '500-2408-1020', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '위드니스케이', address: '의정부시 녹양로 55', lines: 12, scheduledDate: '2024-08-22', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_21', seq: 21, staffName: '김경민', subNumber: '500-2408-1021', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '코앤리빙텔', address: '시흥시 마유로415', lines: 52, scheduledDate: '2024-08-28', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_22', seq: 22, staffName: '이근', subNumber: '500-2408-1022', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '솔빛원룸텔', address: '구리시 안골로49 3층, 9층', lines: 63, scheduledDate: '작업 일정 미정', remarks: '취소', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_23', seq: 23, staffName: '하형준', subNumber: '500-2408-1023', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '애플스테이', address: '부천시 원미구 심곡동 388-11 2층', lines: 20, scheduledDate: '2024-08-23', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_24', seq: 24, staffName: '손민아', subNumber: '500-2408-1024', company: '㈜온파워아이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '라움스테이원룸텔', address: '금천구 시흥대로62길 18-4 1층', lines: 12, scheduledDate: '2024-08-30', remarks: '정산완료', extraNote: '', isHighlighted: false, attachments: [] },
+      { id: 'rec_25', seq: 25, staffName: '박국용', subNumber: '500-2409-1025', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: 'JD네트웍스', manager: '정산헌', contact: '010-8388-9691', customer: '클래스원스테이', address: '구리시 수택동 438-34', lines: 27, scheduledDate: '2024-09-04', remarks: '정산완료', extraNote: '', isHighlighted: true, attachments: [] },
+      { id: 'rec_26', seq: 26, staffName: '박정훈', subNumber: '500-2409-1026', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '다나씨엠', address: '천호대로159길 13', lines: 41, scheduledDate: '2024-09-24', remarks: '정산완료', extraNote: '12월', isHighlighted: true, attachments: [] },
+      { id: 'rec_27', seq: 27, staffName: '오세웅', subNumber: '500-2409-1027', company: '(주)이앤티', workType: '단체형IPTV', unitPrice: 35000, isDifficult: false, branch: '주식회사 디컴스', manager: '이대운', contact: '010-6776-5602', customer: '서울미즈병원', address: '천호대로 1043', lines: 72, scheduledDate: '2024-09-09', remarks: '정산완료', extraNote: '12월', isHighlighted: false, attachments: [] }
+    ];
+
+    // 초기 회원 데이터 (대표님 관리자 계정: ent2103 / ronaldono9!@)
+    const INITIAL_MEMBERS = [
+      { id: 'mem_admin', username: 'ent2103', password: 'ronaldono9!@', name: '대표님(총괄관리자)', department: '대표이사', phone: '010-0000-0000', role: 'admin', status: 'approved', requestedAt: '2024-04-01' },
+      { id: 'mem_1', username: 'park', password: '1234', name: '박국용', department: '(주)이앤티 구내공사팀', phone: '010-1111-2222', role: 'member', status: 'approved', requestedAt: '2024-04-05' },
+      { id: 'mem_2', username: 'lee', password: '1234', name: '이대운', department: '주식회사 디컴스', phone: '010-6776-5602', role: 'member', status: 'approved', requestedAt: '2024-04-10' },
+      { id: 'mem_3', username: 'jung', password: '1234', name: '정산헌', department: 'JD네트웍스', phone: '010-8388-9691', role: 'member', status: 'pending', requestedAt: '2024-09-20' },
+      { id: 'mem_4', username: 'kim', password: '1234', name: '김경민', department: '구내공사 시공팀', phone: '010-5555-8282', role: 'member', status: 'pending', requestedAt: '2024-09-25' }
+    ];
+
+    const DEFAULT_FORM = {
+      seq: '',
+      staffName: '박국용',
+      subNumber: '',
+      company: '(주)이앤티',
+      workType: '단체형IPTV',
+      unitPrice: BASE_UNIT_PRICE,
+      isDifficult: false,
+      branch: '',
+      manager: '',
+      contact: '',
+      customer: '',
+      address: '',
+      lines: '',
+      scheduledDate: '',
+      remarks: '정산완료',
+      extraNote: '',
+      isHighlighted: false,
+      attachments: []
+    };
+
+    function App() {
+      const [user, setUser] = useState(hasCloudFirebase ? null : { uid: 'standalone-user' });
+      const [records, setRecords] = useState(hasCloudFirebase ? [] : INITIAL_DATA);
+      const [members, setMembers] = useState(hasCloudFirebase ? [] : INITIAL_MEMBERS);
+      const [loading, setLoading] = useState(hasCloudFirebase);
+      
+      // App Auth & Member Approval States
+      const [currentMember, setCurrentMember] = useState(null);
+      const [authTab, setAuthTab] = useState('LOGIN');
+      const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+      const [signupForm, setSignupForm] = useState({
+        username: '',
+        password: '',
+        name: '',
+        department: '구내공사 시공팀',
+        phone: ''
+      });
+      const [authNotice, setAuthNotice] = useState({ type: '', message: '' });
+      const [isMemberModalOpen, setIsMemberModalOpen] = useState(false);
+
+      // UI & Filter States
+      const [searchQuery, setSearchQuery] = useState('');
+      const [statusFilter, setStatusFilter] = useState('ALL');
+      const [companyFilter, setCompanyFilter] = useState('ALL');
+      const [staffFilter, setStaffFilter] = useState('ALL');
+      const [monthFilter, setMonthFilter] = useState('ALL');
+      const [isModalOpen, setIsModalOpen] = useState(false);
+      const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+      const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+      const tableSectionRef = useRef(null);
+
+      // Attachment Management States
+      const [attachmentModalRecordId, setAttachmentModalRecordId] = useState(null);
+      const [attachmentNotice, setAttachmentNotice] = useState({ type: '', message: '' });
+      const [uploadingFile, setUploadingFile] = useState(false);
+      const [previewAttachment, setPreviewAttachment] = useState(null);
+
+      // Share Modal State
+      const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+      const [copySuccess, setCopySuccess] = useState(false);
+      
+      // Form State
+      const [formData, setFormData] = useState(DEFAULT_FORM);
+      const [editingId, setEditingId] = useState(null);
+
+      // Masking States
+      const [isMasked, setIsMasked] = useState(true);
+      const [showPasswordModal, setShowPasswordModal] = useState(false);
+      const [passwordInput, setPasswordInput] = useState('');
+      const [passwordError, setPasswordError] = useState('');
+
+      // --- Status Classification Helpers ---
+      const isCompletedRecord = (r) => (r.remarks || '').trim() === '정산완료';
+      const isCanceledRecord = (r) => {
+        const rem = (r.remarks || '').trim();
+        return rem.includes('취소') || rem.includes('보류');
+      };
+      const isInProgressRecord = (r) => !isCompletedRecord(r) && !isCanceledRecord(r);
+
+      const getRemarksBadgeStyle = (remarksText) => {
+        const rem = (remarksText || '').trim();
+        if (rem === '정산완료') return 'bg-emerald-100 text-emerald-800 border-emerald-300';
+        if (rem === '개통완료') return 'bg-blue-100 text-blue-800 border-blue-300';
+        if (rem === '개통예정') return 'bg-indigo-100 text-indigo-800 border-indigo-300';
+        if (rem === '보류') return 'bg-amber-100 text-amber-800 border-amber-300';
+        if (rem === '취소') return 'bg-red-100 text-red-700 border-red-300';
+        return 'bg-slate-100 text-slate-700 border-slate-300';
+      };
+
+      const getEffectiveUnitPrice = (r) => {
+        const base = Number(r.unitPrice) || BASE_UNIT_PRICE;
+        const extra = r.isDifficult ? DIFFICULT_EXTRA_PRICE : 0;
+        return base + extra;
+      };
+
+      const getRecordTotalPrice = (r) => (Number(r.lines) || 0) * getEffectiveUnitPrice(r);
+
+      const getRecordMonthKey = (scheduledDate) => {
+        const str = String(scheduledDate || '').trim();
+        const match = str.match(/^(\d{4})-(\d{2})/);
+        if (match) return `${match[1]}-${match[2]}`;
+        return 'UNDECIDED';
+      };
+
+      const formatMonthLabel = (monthKey) => {
+        if (monthKey === 'UNDECIDED') return '일정미정/기타';
+        const [year, month] = monthKey.split('-');
+        return `${year}년 ${Number(month)}월`;
+      };
+
+      // --- Masking Helper Functions ---
+      const maskSubNumber = (subNo) => {
+        if (!subNo) return '-';
+        const str = String(subNo).trim();
+        if (str.includes('-')) {
+          const parts = str.split('-');
+          if (parts.length >= 3) return `${parts[0]}-****-${parts[parts.length - 1]}`;
+          if (parts.length === 2) return `${parts[0]}-****`;
+        }
+        if (str.length >= 7) return str.substring(0, 3) + '****' + str.substring(str.length - 3);
+        return '****';
+      };
+
+      const maskPhone = (phone) => {
+        if (!phone) return '-';
+        const str = String(phone).trim();
+        const parts = str.split('-');
+        if (parts.length === 3) return `${parts[0]}-****-${parts[2]}`;
+        if (str.length > 7) return str.substring(0, 3) + '-****-' + str.substring(str.length - 4);
+        return '****';
+      };
+
+      const maskAddress = (address) => {
+        if (!address) return '-';
+        const str = String(address).trim();
+        const parts = str.split(' ');
+        if (parts.length > 2) return `${parts[0]} ${parts[1]} ****`;
+        return `${parts[0]} ****`;
+      };
+
+      const handleToggleMask = () => {
+        if (isMasked) {
+          setShowPasswordModal(true);
+          setPasswordInput('');
+          setPasswordError('');
+        } else {
+          setIsMasked(true);
+        }
+      };
+
+      const handlePasswordSubmit = (e) => {
+        e.preventDefault();
+        if (passwordInput === 'ronaldono9!@' || passwordInput === '1234') {
+          setIsMasked(false);
+          setShowPasswordModal(false);
+        } else {
+          setPasswordError('비밀번호가 일치하지 않습니다.');
+        }
+      };
+
+      // 2. Auth Effect (Cloud Mode)
+      useEffect(() => {
+        if (!hasCloudFirebase || !auth) return;
+        const initAuth = async () => {
+          try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+              await signInAnonymously(auth);
+            }
+          } catch (err) {
+            console.error("Authentication failed:", err);
+            setLoading(false);
+          }
+        };
+        initAuth();
+        const unsubscribe = onAuthStateChanged(auth, setUser);
+        return () => unsubscribe();
+      }, []);
+
+      // 3. Data Fetching & Seeding Effect (Cloud Mode)
+      useEffect(() => {
+        if (!hasCloudFirebase || !db || !user) return;
+
+        const recordsRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_records');
+        const membersRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_members');
+
+        let unsubRecords = null;
+        let unsubMembers = null;
+
+        const seedAndListen = async () => {
+          try {
+            const snapRecords = await getDocs(recordsRef);
+            if (snapRecords.empty) {
+              for (const item of INITIAL_DATA) {
+                const { id, ...rest } = item;
+                await addDoc(recordsRef, { ...rest, createdAt: serverTimestamp() });
+              }
+            }
+
+            const snapMembers = await getDocs(membersRef);
+            if (snapMembers.empty) {
+              for (const m of INITIAL_MEMBERS) {
+                const { id, ...rest } = m;
+                await addDoc(membersRef, { ...rest, createdAt: serverTimestamp() });
+              }
+            } else {
+              const hasNewAdmin = snapMembers.docs.some(d => d.data().username === 'ent2103');
+              const oldAdminDoc = snapMembers.docs.find(d => d.data().username === 'admin');
+              if (oldAdminDoc && !hasNewAdmin) {
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', oldAdminDoc.id), {
+                  username: 'ent2103',
+                  password: 'ronaldono9!@',
+                  role: 'admin',
+                  status: 'approved'
+                });
+              } else if (!hasNewAdmin) {
+                const { id, ...adminData } = INITIAL_MEMBERS[0];
+                await addDoc(membersRef, { ...adminData, createdAt: serverTimestamp() });
+              }
+            }
+
+            unsubRecords = onSnapshot(recordsRef, 
+              (snapshot) => {
+                const fetchedRecords = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+                fetchedRecords.sort((a, b) => (Number(a.seq) || 9999) - (Number(b.seq) || 9999));
+                setRecords(fetchedRecords);
+                setLoading(false);
+              },
+              (error) => {
+                console.error("Firestore records error:", error);
+                setLoading(false);
+              }
+            );
+
+            unsubMembers = onSnapshot(membersRef,
+              (snapshot) => {
+                setMembers(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
+              },
+              (error) => console.error("Firestore members error:", error)
+            );
+          } catch (err) {
+            console.error("Setup error:", err);
+            setLoading(false);
+          }
+        };
+
+        seedAndListen();
+        return () => {
+          if (unsubRecords) unsubRecords();
+          if (unsubMembers) unsubMembers();
+        };
+      }, [user]);
+
+      // --- Member Login & Signup Handlers ---
+      const handleLoginSubmit = (e) => {
+        e.preventDefault();
+        setAuthNotice({ type: '', message: '' });
+
+        const uidInput = loginForm.username.trim();
+        const pwInput = loginForm.password.trim();
+
+        if (!uidInput || !pwInput) {
+          setAuthNotice({ type: 'error', message: '아이디와 비밀번호를 모두 입력해주세요.' });
+          return;
+        }
+
+        if (uidInput === 'ent2103' && pwInput === 'ronaldono9!@') {
+          const adminMember = members.find(m => m.username === 'ent2103') || INITIAL_MEMBERS[0];
+          setCurrentMember(adminMember);
+          setLoginForm({ username: '', password: '' });
+          return;
+        }
+
+        const matched = members.find(m => m.username === uidInput && m.password === pwInput);
+        if (!matched) {
+          setAuthNotice({ type: 'error', message: '아이디 또는 비밀번호가 일치하지 않습니다.' });
+          return;
+        }
+        if (matched.status === 'pending') {
+          setAuthNotice({ type: 'warning', message: '관리자 승인 대기 중인 계정입니다. 대표님 승인 완료 후 시스템 접속이 가능합니다.' });
+          return;
+        }
+        if (matched.status === 'rejected') {
+          setAuthNotice({ type: 'error', message: '가입 승인이 반려되었거나 접근이 제한된 계정입니다.' });
+          return;
+        }
+
+        setCurrentMember(matched);
+        setLoginForm({ username: '', password: '' });
+      };
+
+      const handleSignupSubmit = async (e) => {
+        e.preventDefault();
+        setAuthNotice({ type: '', message: '' });
+
+        const { username, password, name, department, phone } = signupForm;
+        if (!username.trim() || !password.trim() || !name.trim()) {
+          setAuthNotice({ type: 'error', message: '필수 항목(아이디, 비밀번호, 성명)을 모두 입력해주세요.' });
+          return;
+        }
+
+        const exists = members.some(m => m.username.toLowerCase() === username.trim().toLowerCase());
+        if (exists) {
+          setAuthNotice({ type: 'error', message: '이미 사용 중인 아이디입니다.' });
+          return;
+        }
+
+        const newMemberObj = {
+          username: username.trim(),
+          password: password.trim(),
+          name: name.trim(),
+          department: department.trim() || '협력사 직원',
+          phone: phone.trim() || '-',
+          role: 'member',
+          status: 'pending',
+          requestedAt: new Date().toISOString().slice(0, 10)
+        };
+
+        try {
+          if (hasCloudFirebase && db) {
+            const membersRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_members');
+            await addDoc(membersRef, { ...newMemberObj, createdAt: serverTimestamp() });
+          } else {
+            setMembers(prev => [...prev, { ...newMemberObj, id: `mem_${Date.now()}` }]);
+          }
+          setSignupForm({ username: '', password: '', name: '', department: '구내공사 시공팀', phone: '' });
+          setAuthTab('LOGIN');
+          setAuthNotice({
+            type: 'success',
+            message: '회원가입 신청이 접수되었습니다! 대표님(관리자) 승인 후 로그인하실 수 있습니다.'
+          });
+        } catch (error) {
+          setAuthNotice({ type: 'error', message: '가입 신청 중 오류가 발생했습니다.' });
+        }
+      };
+
+      const handleUpdateMemberStatus = async (memberId, newStatus, newRole = null) => {
+        const payload = { status: newStatus };
+        if (newRole) payload.role = newRole;
+
+        if (hasCloudFirebase && db) {
+          const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', memberId);
+          await updateDoc(docRef, { ...payload, updatedAt: serverTimestamp() });
+        } else {
+          setMembers(prev => prev.map(m => m.id === memberId ? { ...m, ...payload } : m));
+        }
+      };
+
+      const handleUpdateMemberRole = async (memberId, newRole) => {
+        if (hasCloudFirebase && db) {
+          const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', memberId);
+          await updateDoc(docRef, { role: newRole, updatedAt: serverTimestamp() });
+        } else {
+          setMembers(prev => prev.map(m => m.id === memberId ? { ...m, role: newRole } : m));
+        }
+      };
+
+      const handleDeleteMember = async (memberId) => {
+        if (hasCloudFirebase && db) {
+          const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', memberId);
+          await deleteDoc(docRef);
+        } else {
+          setMembers(prev => prev.filter(m => m.id !== memberId));
+        }
+      };
+
+      const pendingMembersCount = useMemo(() => members.filter(m => m.status === 'pending').length, [members]);
+      const isAdmin = currentMember?.role === 'admin';
+      const getCleanMemberName = (rawName) => rawName ? String(rawName).trim().split(' ')[0] : '';
+
+      const isOwnedByCurrentMember = (record) => {
+        if (!currentMember) return false;
+        if (currentMember.role === 'admin') return true;
+        const rawName = (currentMember.name || '').trim();
+        const cleanName = getCleanMemberName(rawName);
+        const rStaff = (record.staffName || '').trim();
+        const rManager = (record.manager || '').trim();
+        const rCreator = (record.createdBy || '').trim();
+        return (
+          (cleanName && (rStaff === cleanName || rManager === cleanName)) ||
+          (rawName && (rStaff === rawName || rManager === rawName)) ||
+          (currentMember.username && rCreator === currentMember.username)
+        );
+      };
+
+      const accessibleRecords = useMemo(() => {
+        if (!currentMember) return [];
+        if (isAdmin) return records;
+        return records.filter(isOwnedByCurrentMember);
+      }, [records, currentMember, isAdmin]);
+
+      const availableCompanies = useMemo(() => {
+        const set = new Set(COMPANY_LIST);
+        accessibleRecords.forEach(r => { if (r.company && r.company.trim()) set.add(r.company.trim()); });
+        return Array.from(set);
+      }, [accessibleRecords]);
+
+      const availableMonths = useMemo(() => {
+        const set = new Set();
+        let hasUndecided = false;
+        accessibleRecords.forEach(r => {
+          const mKey = getRecordMonthKey(r.scheduledDate);
+          if (mKey === 'UNDECIDED') hasUndecided = true;
+          else set.add(mKey);
+        });
+        const sorted = Array.from(set).sort();
+        if (hasUndecided) sorted.push('UNDECIDED');
+        return sorted;
+      }, [accessibleRecords]);
+
+      const filteredRecords = useMemo(() => {
+        return accessibleRecords.filter(r => {
+          const rem = (r.remarks || '').trim();
+          const matchesStatus = 
+            statusFilter === 'ALL' ? true :
+            statusFilter === 'COMPLETED' ? isCompletedRecord(r) :
+            statusFilter === 'IN_PROGRESS' ? isInProgressRecord(r) :
+            statusFilter === 'CANCELED' ? isCanceledRecord(r) :
+            statusFilter === 'HIGHLIGHTED' ? Boolean(r.isHighlighted) :
+            REMARKS_STATUS_LIST.includes(statusFilter) ? rem === statusFilter : true;
+          if (!matchesStatus) return false;
+          if (companyFilter !== 'ALL' && (r.company || '').trim() !== companyFilter) return false;
+          if (isAdmin && staffFilter !== 'ALL' && (r.staffName || '').trim() !== staffFilter) return false;
+          if (monthFilter !== 'ALL' && getRecordMonthKey(r.scheduledDate) !== monthFilter) return false;
+          if (!searchQuery.trim()) return true;
+
+          const lowerQuery = searchQuery.toLowerCase();
+          return (
+            (r.customer && r.customer.toLowerCase().includes(lowerQuery)) ||
+            (r.manager && r.manager.toLowerCase().includes(lowerQuery)) ||
+            (r.branch && r.branch.toLowerCase().includes(lowerQuery)) ||
+            (r.company && r.company.toLowerCase().includes(lowerQuery)) ||
+            (r.staffName && r.staffName.toLowerCase().includes(lowerQuery)) ||
+            (r.subNumber && r.subNumber.toLowerCase().includes(lowerQuery)) ||
+            (r.address && r.address.toLowerCase().includes(lowerQuery))
+          );
+        });
+      }, [accessibleRecords, searchQuery, statusFilter, companyFilter, staffFilter, monthFilter, isAdmin]);
+
+      const summary = useMemo(() => {
+        const baseRecords = accessibleRecords.filter(r => {
+          if (companyFilter !== 'ALL' && (r.company || '').trim() !== companyFilter) return false;
+          if (isAdmin && staffFilter !== 'ALL' && (r.staffName || '').trim() !== staffFilter) return false;
+          if (monthFilter !== 'ALL' && getRecordMonthKey(r.scheduledDate) !== monthFilter) return false;
+          return true;
+        });
+
+        const totalCount = baseRecords.length;
+        const totalLines = baseRecords.reduce((acc, cur) => acc + (Number(cur.lines) || 0), 0);
+        const totalAmount = baseRecords.reduce((acc, cur) => acc + getRecordTotalPrice(cur), 0);
+
+        const completedList = baseRecords.filter(isCompletedRecord);
+        const inProgressList = baseRecords.filter(isInProgressRecord);
+        const canceledList = baseRecords.filter(isCanceledRecord);
+
+        return {
+          totalCount, totalLines, totalAmount,
+          completedCount: completedList.length,
+          completedLines: completedList.reduce((acc, cur) => acc + (Number(cur.lines) || 0), 0),
+          completedAmount: completedList.reduce((acc, cur) => acc + getRecordTotalPrice(cur), 0),
+          inProgressCount: inProgressList.length,
+          inProgressLines: inProgressList.reduce((acc, cur) => acc + (Number(cur.lines) || 0), 0),
+          canceledCount: canceledList.length,
+          canceledLines: canceledList.reduce((acc, cur) => acc + (Number(cur.lines) || 0), 0),
+          highlightedCount: baseRecords.filter(r => r.isHighlighted).length
+        };
+      }, [accessibleRecords, companyFilter, staffFilter, monthFilter, isAdmin]);
+
+      const handleDashboardCardClick = (filterType) => {
+        setStatusFilter(filterType);
+        if (tableSectionRef.current) {
+          tableSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      };
+
+      const handleOpenModal = (record = null) => {
+        if (record) {
+          if (!isOwnedByCurrentMember(record)) return;
+          setFormData({
+            seq: record.seq || '',
+            staffName: record.staffName || '박국용',
+            subNumber: record.subNumber || '',
+            company: record.company || '(주)이앤티',
+            workType: record.workType || '단체형IPTV',
+            unitPrice: record.unitPrice || BASE_UNIT_PRICE,
+            isDifficult: Boolean(record.isDifficult),
+            branch: record.branch || '',
+            manager: record.manager || '',
+            contact: record.contact || '',
+            customer: record.customer || '',
+            address: record.address || '',
+            lines: record.lines || '',
+            scheduledDate: record.scheduledDate || '',
+            remarks: record.remarks || '',
+            extraNote: record.extraNote || '',
+            isHighlighted: Boolean(record.isHighlighted),
+            attachments: Array.isArray(record.attachments) ? record.attachments : []
+          });
+          setEditingId(record.id);
+        } else {
+          const nextSeq = records.length > 0 ? Math.max(...records.map(r => Number(r.seq) || 0)) + 1 : 1;
+          const defaultSubNo = `500-2409-${String(1000 + nextSeq).slice(-4)}`;
+          const myCleanName = getCleanMemberName(currentMember?.name);
+          const defaultStaff = !isAdmin
+            ? (myCleanName || currentMember?.name || '박국용')
+            : (staffFilter !== 'ALL' ? staffFilter : STAFF_LIST[(nextSeq - 1) % STAFF_LIST.length]);
+
+          setFormData({
+            ...DEFAULT_FORM,
+            seq: nextSeq,
+            staffName: defaultStaff,
+            manager: !isAdmin ? (myCleanName || currentMember?.name || '') : '',
+            company: companyFilter !== 'ALL' ? companyFilter : '(주)이앤티',
+            subNumber: defaultSubNo,
+            attachments: []
+          });
+          setEditingId(null);
+        }
+        setIsModalOpen(true);
+      };
+
+      // --- Attachment Helpers ---
+      const detectAttachmentCategory = (file) => {
+        const name = (file.name || '').toLowerCase();
+        const type = (file.type || '').toLowerCase();
+        if (type.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp)$/.test(name)) return 'IMAGE';
+        if (name.endsWith('.pdf') || type === 'application/pdf') return 'PDF';
+        if (/\.(xlsx|xls|csv)$/.test(name) || type.includes('spreadsheet') || type.includes('excel') || type.includes('csv')) return 'EXCEL';
+        return 'OTHER';
+      };
+
+      const formatFileSize = (bytes) => {
+        const num = Number(bytes) || 0;
+        if (num < 1024) return `${num} B`;
+        if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+        return `${(num / (1024 * 1024)).toFixed(2)} MB`;
+      };
+
+      const convertFileToAttachmentItem = (file) => {
+        return new Promise((resolve, reject) => {
+          const category = detectAttachmentCategory(file);
+          if (category === 'OTHER') {
+            reject(new Error(`지원하지 않는 파일 형식입니다 (${file.name}). 사진, 엑셀, PDF만 첨부 가능합니다.`));
+            return;
+          }
+          if (category === 'IMAGE') {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              const img = new window.Image();
+              img.onload = () => {
+                const canvas = document.createElement('canvas');
+                const MAX_DIM = 1200;
+                let width = img.width;
+                let height = img.height;
+                if (width > height && width > MAX_DIM) { height = Math.round((height * MAX_DIM) / width); width = MAX_DIM; }
+                else if (height > MAX_DIM) { width = Math.round((width * MAX_DIM) / height); height = MAX_DIM; }
+                canvas.width = width;
+                canvas.height = height;
+                canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+                const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.78);
+                resolve({
+                  id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                  name: file.name,
+                  category: 'IMAGE',
+                  mimeType: 'image/jpeg',
+                  size: Math.round((compressedDataUrl.length * 3) / 4),
+                  dataUrl: compressedDataUrl,
+                  uploadedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+                  uploadedBy: currentMember?.name || '관리자'
+                });
+              };
+              img.onerror = () => reject(new Error('이미지 로드 오류'));
+              img.src = ev.target.result;
+            };
+            reader.readAsDataURL(file);
+          } else {
+            if (file.size > 650 * 1024) {
+              reject(new Error(`[${file.name}] 파일 크기는 650KB 이하로 첨부해주세요.`));
+              return;
+            }
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              resolve({
+                id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                name: file.name,
+                category,
+                mimeType: file.type || 'application/octet-stream',
+                size: file.size,
+                dataUrl: ev.target.result,
+                uploadedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+                uploadedBy: currentMember?.name || '관리자'
+              });
+            };
+            reader.readAsDataURL(file);
+          }
+        });
+      };
+
+      const updateRecordHelper = async (recordId, updates) => {
+        if (hasCloudFirebase && db) {
+          const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', recordId);
+          await updateDoc(docRef, { ...updates, updatedAt: serverTimestamp() });
+        } else {
+          setRecords(prev => prev.map(r => r.id === recordId ? { ...r, ...updates } : r));
+        }
+      };
+
+      const handleDirectRecordAttachmentUpload = async (e, record) => {
+        const files = Array.from(e.target.files || []);
+        e.target.value = '';
+        if (!files.length || !record || !isOwnedByCurrentMember(record)) return;
+
+        setUploadingFile(true);
+        setAttachmentNotice({ type: '', message: '' });
+        try {
+          const existingList = Array.isArray(record.attachments) ? [...record.attachments] : [];
+          const newItems = [];
+          for (const file of files) {
+            newItems.push(await convertFileToAttachmentItem(file));
+          }
+          const updatedList = [...existingList, ...newItems];
+          await updateRecordHelper(record.id, { attachments: updatedList });
+          setAttachmentNotice({ type: 'success', message: `${newItems.length}개의 파일이 첨부되었습니다.` });
+        } catch (err) {
+          setAttachmentNotice({ type: 'error', message: err.message || '파일 첨부 오류' });
+        } finally {
+          setUploadingFile(false);
+        }
+      };
+
+      const handleDeleteRecordAttachment = async (record, attId) => {
+        if (!record || !isOwnedByCurrentMember(record)) return;
+        const updatedList = (record.attachments || []).filter(item => item.id !== attId);
+        await updateRecordHelper(record.id, { attachments: updatedList });
+        if (previewAttachment && previewAttachment.id === attId) setPreviewAttachment(null);
+        setAttachmentNotice({ type: 'success', message: '첨부파일이 삭제되었습니다.' });
+      };
+
+      const handleFormAttachmentUpload = async (e) => {
+        const files = Array.from(e.target.files || []);
+        e.target.value = '';
+        if (!files.length) return;
+        setUploadingFile(true);
+        try {
+          const currentList = Array.isArray(formData.attachments) ? [...formData.attachments] : [];
+          const added = [];
+          for (const file of files) added.push(await convertFileToAttachmentItem(file));
+          setFormData(prev => ({ ...prev, attachments: [...currentList, ...added] }));
+        } catch (err) {
+          console.error(err);
+        } finally {
+          setUploadingFile(false);
+        }
+      };
+
+      const handleRemoveFormAttachment = (attId) => {
+        setFormData(prev => ({ ...prev, attachments: (prev.attachments || []).filter(a => a.id !== attId) }));
+      };
+
+      const handleDownloadAttachment = (att) => {
+        if (!att || !att.dataUrl) return;
+        const link = document.createElement('a');
+        link.href = att.dataUrl;
+        link.setAttribute('download', att.name || 'attachment');
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+
+      const activeAttachmentRecord = useMemo(() => {
+        if (!attachmentModalRecordId) return null;
+        return records.find(r => r.id === attachmentModalRecordId) || null;
+      }, [records, attachmentModalRecordId]);
+
+      const handleCloseModal = () => {
+        setIsModalOpen(false);
+        setFormData(DEFAULT_FORM);
+        setEditingId(null);
+      };
+
+      const handleChange = (e) => {
+        const { name, value, type, checked } = e.target;
+        setFormData(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
+      };
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        const myCleanName = getCleanMemberName(currentMember?.name);
+        const payload = {
+          ...formData,
+          staffName: !isAdmin ? (myCleanName || formData.staffName) : formData.staffName,
+          seq: Number(formData.seq) || (records.length + 1),
+          lines: Number(formData.lines) || 0,
+          unitPrice: Number(formData.unitPrice) || BASE_UNIT_PRICE,
+          isDifficult: Boolean(formData.isDifficult),
+          createdBy: currentMember?.username || 'ent2103'
+        };
+
+        if (editingId) {
+          await updateRecordHelper(editingId, payload);
+        } else {
+          if (hasCloudFirebase && db) {
+            const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_records');
+            await addDoc(collectionRef, { ...payload, createdAt: serverTimestamp() });
+          } else {
+            setRecords(prev => [...prev, { ...payload, id: `rec_${Date.now()}` }]);
+          }
+        }
+        handleCloseModal();
+      };
+
+      const handleToggleHighlight = (record) => {
+        if (!isOwnedByCurrentMember(record)) return;
+        updateRecordHelper(record.id, { isHighlighted: !record.isHighlighted });
+      };
+
+      const handleToggleDifficult = (record) => {
+        if (!isOwnedByCurrentMember(record)) return;
+        updateRecordHelper(record.id, { isDifficult: !record.isDifficult });
+      };
+
+      const handleQuickRemarksChange = (record, newRemarks) => {
+        if (!isOwnedByCurrentMember(record)) return;
+        updateRecordHelper(record.id, { remarks: newRemarks });
+      };
+
+      const handleDelete = async (id) => {
+        const targetRecord = records.find(r => r.id === id);
+        if (targetRecord && !isOwnedByCurrentMember(targetRecord)) return;
+        if (hasCloudFirebase && db) {
+          const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', id);
+          await deleteDoc(docRef);
+        } else {
+          setRecords(prev => prev.filter(r => r.id !== id));
+        }
+        setDeleteConfirmId(null);
+      };
+
+      const handleResetToExcelData = async () => {
+        setResetConfirmOpen(false);
+        if (hasCloudFirebase && db) {
+          setLoading(true);
+          const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_records');
+          const snap = await getDocs(collectionRef);
+          for (const d of snap.docs) {
+            await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', d.id));
+          }
+          for (const item of INITIAL_DATA) {
+            const { id, ...rest } = item;
+            await addDoc(collectionRef, { ...rest, createdAt: serverTimestamp() });
+          }
+        } else {
+          setRecords(INITIAL_DATA);
+        }
+      };
+
+      const handleCopyShareNotice = () => {
+        const shareText = `[📢 (주)이앤티 단체형IPTV 구내공사 관리시스템 접속 안내]\n1. 공유된 웹 링크를 통해 PC 또는 스마트폰으로 접속합니다.\n2. 처음 접속하시는 직원은 [회원가입 신청] 탭에서 본인의 실명으로 신청해주세요.\n3. 대표님 승인 후 로그인하시면 본인 담당 공사 내역 조회·수정 및 현장 사진/엑셀/PDF 첨부가 연동됩니다.`;
+        const ta = document.createElement('textarea');
+        ta.value = shareText;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2500);
+      };
+
+      const handleExportCSV = () => {
+        const headers = ['순번', '구내공사(업체명)', '구분(직원명)', '공사구분', '유치점', '유치자', '연락처', '고객명', '가입번호', '주소', '회선수', '기본단가', '난개통(+10,000)', '적용단가', '총정산금액', '개통예정일', '비고', '추가메모'];
+        const rows = filteredRecords.map((r, index) => [
+          r.seq || (index + 1),
+          r.company || '',
+          r.staffName || '-',
+          r.workType || '단체형IPTV',
+          r.branch || '',
+          r.manager || '',
+          isMasked ? maskPhone(r.contact) : (r.contact || ''),
+          r.customer || '',
+          isMasked ? maskSubNumber(r.subNumber) : (r.subNumber || ''),
+          isMasked ? maskAddress(r.address) : (r.address || ''),
+          r.lines || 0,
+          Number(r.unitPrice) || BASE_UNIT_PRICE,
+          r.isDifficult ? 'Y (+10,000)' : 'N',
+          getEffectiveUnitPrice(r),
+          getRecordTotalPrice(r),
+          r.scheduledDate || '',
+          r.remarks || '',
+          r.extraNote || ''
+        ]);
+
+        const csvContent = '\uFEFF' + [headers, ...rows]
+          .map(e => e.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+          .join('\n');
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `(이앤티)단체형IPTV_구내공사_리스트_${new Date().toISOString().slice(0,10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+
+      if (loading) {
+        return (
+          <div className="flex h-screen items-center justify-center bg-slate-900">
+            <div className="flex flex-col items-center text-slate-300">
+              <div className="h-11 w-11 animate-spin rounded-full border-4 border-slate-700 border-t-blue-500 mb-4"></div>
+              <p className="text-lg font-semibold text-white">전산 시스템 보안 및 데이터를 불러오는 중입니다...</p>
+            </div>
+          </div>
+        );
+      }
+
+      if (!currentMember) {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-blue-950 flex items-center justify-center p-4">
+            <div className="w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 bg-white rounded-2xl shadow-2xl overflow-hidden border border-slate-700/40">
+              <div className="lg:col-span-5 bg-slate-900 text-white p-6 sm:p-8 flex flex-col justify-between">
+                <div>
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/20 border border-blue-400/30 text-blue-300 text-xs font-semibold mb-5">
+                    <ShieldCheck className="w-4 h-4" /> 승인제 보안 전산망
+                  </div>
+                  <h1 className="text-2xl font-extrabold tracking-tight leading-snug">
+                    (주)이앤티 단체형IPTV<br />구내공사 관리시스템
+                  </h1>
+                  <p className="text-xs sm:text-sm text-slate-400 mt-3 leading-relaxed">
+                    LGU+ 아파트·빌딩·병원 단체형 광랜 및 IPTV 구내공사 개통·정산 통합 관리 프로그램입니다.
+                  </p>
+                  <div className="mt-6 space-y-2.5 text-xs text-slate-300 bg-slate-800/70 p-4 rounded-xl border border-slate-700">
+                    <div className="font-bold text-amber-300 flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5" /> 회원제 및 대표 승인 안내
+                    </div>
+                    <p className="text-slate-400 leading-relaxed">
+                      • 신규 직원은 <strong>[회원가입 신청]</strong> 후 대표님(관리자)의 승인이 완료되어야 로그인이 가능합니다.<br />
+                      • 일반 직원은 본인 담당 공사 내역만 열람·수정 가능하며, 개인정보는 마스킹 보호됩니다.
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-8 pt-5 border-t border-slate-800 text-xs text-slate-400 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" /> 인가된 임직원 전용 시스템
+                  </span>
+                  <span className="text-slate-500 font-mono">v2.5 Standalone</span>
+                </div>
+              </div>
+
+              <div className="lg:col-span-7 p-6 sm:p-8 flex flex-col justify-center bg-white">
+                <div className="flex border-b border-slate-200 mb-6">
+                  <button
+                    type="button"
+                    onClick={() => { setAuthTab('LOGIN'); setAuthNotice({ type: '', message: '' }); }}
+                    className={`flex-1 pb-3 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${
+                      authTab === 'LOGIN' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-700'
+                    }`}
+                  >
+                    <LogIn className="w-4 h-4" /> 로그인
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setAuthTab('SIGNUP'); setAuthNotice({ type: '', message: '' }); }}
+                    className={`flex-1 pb-3 text-sm font-bold border-b-2 transition-colors flex items-center justify-center gap-2 ${
+                      authTab === 'SIGNUP' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-700'
+                    }`}
+                  >
+                    <UserPlus className="w-4 h-4" /> 회원가입 신청 (관리자 승인제)
+                  </button>
+                </div>
+
+                {authNotice.message && (
+                  <div className={`mb-5 p-3.5 rounded-xl border text-xs sm:text-sm font-medium flex items-start gap-2.5 ${
+                    authNotice.type === 'error' ? 'bg-red-50 border-red-200 text-red-700' :
+                    authNotice.type === 'warning' ? 'bg-amber-50 border-amber-300 text-amber-800' :
+                    'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  }`}>
+                    <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                    <div className="leading-relaxed">{authNotice.message}</div>
+                  </div>
+                )}
+
+                {authTab === 'LOGIN' ? (
+                  <form onSubmit={handleLoginSubmit} className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">아이디</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="아이디를 입력하세요"
+                        value={loginForm.username}
+                        onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+                        className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">비밀번호</label>
+                      <input
+                        type="password"
+                        required
+                        placeholder="비밀번호를 입력하세요"
+                        value={loginForm.password}
+                        onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+                        className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm rounded-xl shadow-md transition-colors mt-2"
+                    >
+                      시스템 로그인
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleSignupSubmit} className="space-y-3.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">아이디 *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="영문/숫자 아이디"
+                          value={signupForm.username}
+                          onChange={(e) => setSignupForm({ ...signupForm, username: e.target.value })}
+                          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">비밀번호 *</label>
+                        <input
+                          type="password"
+                          required
+                          placeholder="비밀번호 입력"
+                          value={signupForm.password}
+                          onChange={(e) => setSignupForm({ ...signupForm, password: e.target.value })}
+                          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">이름(실명) *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="예: 박국용"
+                          value={signupForm.name}
+                          onChange={(e) => setSignupForm({ ...signupForm, name: e.target.value })}
+                          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">소속 / 직책</label>
+                        <input
+                          type="text"
+                          placeholder="예: 구내공사 시공팀"
+                          value={signupForm.department}
+                          onChange={(e) => setSignupForm({ ...signupForm, department: e.target.value })}
+                          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">연락처</label>
+                      <input
+                        type="text"
+                        placeholder="010-0000-0000"
+                        value={signupForm.phone}
+                        onChange={(e) => setSignupForm({ ...signupForm, phone: e.target.value })}
+                        className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-md transition-colors"
+                    >
+                      회원가입 승인 요청하기
+                    </button>
+                  </form>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen bg-slate-100 flex flex-col">
+          {/* Header */}
+          <header className="bg-slate-900 text-white shadow-md z-10 sticky top-0">
+            <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-600/20 rounded-lg border border-blue-500/30">
+                  <Building2 className="w-6 h-6 text-blue-400" />
+                </div>
+                <div>
+                  <h1 className="text-base sm:text-xl font-bold tracking-wide">(주)이앤티 단체형IPTV구내공사 관리시스템</h1>
+                  <p className="text-xs text-slate-400 hidden sm:block">LGU+ 구내통신 및 단체형 IPTV 개통·정산 통합 전산망</p>
+                </div>
+              </div>
+
+              <div className="flex items-center flex-wrap gap-2 sm:gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsShareModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>직원 공유 · 접속안내</span>
+                </button>
+
+                <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${
+                  isMasked ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                }`}>
+                  {isMasked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                  {isMasked ? '개인정보 보호모드' : '마스킹 해제됨'}
+                </span>
+
+                {currentMember.role === 'admin' && (
+                  <button
+                    onClick={() => setIsMemberModalOpen(true)}
+                    className="relative inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                  >
+                    <Users className="w-4 h-4" />
+                    <span>회원승인 관리</span>
+                    {pendingMembersCount > 0 && (
+                      <span className="ml-1 px-1.5 py-0.2 bg-amber-400 text-slate-950 rounded-full text-[11px] font-extrabold">
+                        {pendingMembersCount}
+                      </span>
+                    )}
+                  </button>
+                )}
+
+                <div className="flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold ${
+                    isAdmin ? 'bg-amber-400 text-slate-950' : 'bg-blue-600 text-white'
+                  }`}>
+                    {isAdmin ? '관리자 모드' : '일반 모드'}
+                  </span>
+                  <span className="font-bold text-blue-300">{currentMember.name}</span>
+                  <button
+                    onClick={() => setCurrentMember(null)}
+                    className="ml-1 text-slate-400 hover:text-red-400 transition-colors flex items-center gap-1 font-medium"
+                  >
+                    <LogOut className="w-3.5 h-3.5" /> 로그아웃
+                  </button>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {/* Main */}
+          <main className="flex-1 w-full max-w-screen-2xl mx-auto p-4 sm:p-6 flex flex-col gap-5">
+            {/* Dashboard Cards */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <button
+                type="button"
+                onClick={() => handleDashboardCardClick('ALL')}
+                className={`text-left bg-white rounded-xl p-4 shadow-sm border transition-all flex items-center justify-between ${
+                  statusFilter === 'ALL' ? 'border-blue-600 ring-2 ring-blue-500/20' : 'border-slate-200'
+                }`}
+              >
+                <div>
+                  <p className="text-xs font-bold text-slate-500">전체 구내공사 리스트</p>
+                  <p className="text-xl sm:text-2xl font-extrabold text-slate-900 mt-1">{summary.totalCount}건</p>
+                  <p className="text-[11px] font-semibold text-blue-600 mt-1">
+                    총 {summary.totalLines.toLocaleString()} 회선 · {summary.totalAmount.toLocaleString()}원
+                  </p>
+                </div>
+                <div className="p-3 bg-slate-100 rounded-xl text-slate-700"><Layers className="w-6 h-6" /></div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleDashboardCardClick('COMPLETED')}
+                className={`text-left bg-white rounded-xl p-4 shadow-sm border transition-all flex items-center justify-between ${
+                  statusFilter === 'COMPLETED' ? 'border-emerald-600 ring-2 ring-emerald-500/20' : 'border-slate-200'
+                }`}
+              >
+                <div>
+                  <p className="text-xs font-bold text-slate-500">정산완료 내역</p>
+                  <p className="text-xl sm:text-2xl font-extrabold text-emerald-600 mt-1">{summary.completedCount}건</p>
+                  <p className="text-[11px] font-semibold text-emerald-700 mt-1">
+                    개통 {summary.completedLines.toLocaleString()} 회선 · {summary.completedAmount.toLocaleString()}원
+                  </p>
+                </div>
+                <div className="p-3 bg-emerald-50 rounded-xl text-emerald-600"><CheckCircle2 className="w-6 h-6" /></div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleDashboardCardClick('IN_PROGRESS')}
+                className={`text-left bg-white rounded-xl p-4 shadow-sm border transition-all flex items-center justify-between ${
+                  statusFilter === 'IN_PROGRESS' ? 'border-amber-500 ring-2 ring-amber-500/20' : 'border-slate-200'
+                }`}
+              >
+                <div>
+                  <p className="text-xs font-bold text-slate-500">진행중 / 서류제출</p>
+                  <p className="text-xl sm:text-2xl font-extrabold text-amber-600 mt-1">{summary.inProgressCount}건</p>
+                  <p className="text-[11px] font-semibold text-amber-700 mt-1">대기 {summary.inProgressLines.toLocaleString()} 회선</p>
+                </div>
+                <div className="p-3 bg-amber-50 rounded-xl text-amber-600"><Clock className="w-6 h-6" /></div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleDashboardCardClick('CANCELED')}
+                className={`text-left bg-white rounded-xl p-4 shadow-sm border transition-all flex items-center justify-between ${
+                  statusFilter === 'CANCELED' ? 'border-red-500 ring-2 ring-red-500/20' : 'border-slate-200'
+                }`}
+              >
+                <div>
+                  <p className="text-xs font-bold text-slate-500">취소 / 일정미정</p>
+                  <p className="text-xl sm:text-2xl font-extrabold text-red-500 mt-1">{summary.canceledCount}건</p>
+                  <p className="text-[11px] font-semibold text-red-600 mt-1">보류 {summary.canceledLines.toLocaleString()} 회선</p>
+                </div>
+                <div className="p-3 bg-red-50 rounded-xl text-red-500"><AlertCircle className="w-6 h-6" /></div>
+              </button>
+            </div>
+
+            {/* Filter & Action Bar */}
+            <div ref={tableSectionRef} className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 flex flex-col gap-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs font-extrabold text-slate-600 mr-1">업체명 필터:</span>
+                  <button
+                    type="button"
+                    onClick={() => setCompanyFilter('ALL')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold ${companyFilter === 'ALL' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'}`}
+                  >
+                    전체 업체 ({accessibleRecords.length})
+                  </button>
+                  {availableCompanies.map((comp) => (
+                    <button
+                      key={comp}
+                      type="button"
+                      onClick={() => setCompanyFilter(comp)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold ${companyFilter === comp ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}
+                    >
+                      {comp} ({accessibleRecords.filter(r => (r.company || '').trim() === comp).length})
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {isAdmin && (
+                    <select
+                      value={staffFilter}
+                      onChange={(e) => setStaffFilter(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold border border-slate-300 bg-slate-50"
+                    >
+                      <option value="ALL">전체 직원 ({STAFF_LIST.length}명)</option>
+                      {STAFF_LIST.map((s) => (
+                        <option key={s} value={s}>{s} ({accessibleRecords.filter(r => r.staffName === s).length}건)</option>
+                      ))}
+                    </select>
+                  )}
+
+                  <select
+                    value={monthFilter}
+                    onChange={(e) => setMonthFilter(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold border border-slate-300 bg-slate-50"
+                  >
+                    <option value="ALL">개통예정월 전체</option>
+                    {availableMonths.map((mKey) => (
+                      <option key={mKey} value={mKey}>{formatMonthLabel(mKey)}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-4">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 flex-1">
+                  <div className="relative flex-1 max-w-md">
+                    <input
+                      type="text"
+                      placeholder="고객명, 가입번호, 직원명, 업체명 검색..."
+                      className="block w-full px-3.5 py-2 border border-slate-300 rounded-lg text-sm"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-lg text-xs font-medium">
+                    <button onClick={() => setStatusFilter('ALL')} className={`px-2.5 py-1.5 rounded-md ${statusFilter === 'ALL' ? 'bg-white font-bold shadow-sm' : ''}`}>전체</button>
+                    {REMARKS_STATUS_LIST.map((st) => (
+                      <button key={st} onClick={() => setStatusFilter(st)} className={`px-2.5 py-1.5 rounded-md ${statusFilter === st ? 'bg-white text-blue-700 font-bold shadow-sm' : ''}`}>{st}</button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button onClick={handleToggleMask} className="px-3.5 py-2 text-sm font-medium rounded-lg bg-slate-800 text-white">
+                    {isMasked ? '마스킹 해제' : '마스킹 적용'}
+                  </button>
+                  <button onClick={handleExportCSV} className="px-3.5 py-2 text-sm font-medium rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    엑셀(CSV) 저장
+                  </button>
+                  <button onClick={() => handleOpenModal()} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold">
+                    + 신규 내역 등록
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Table */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-300 overflow-hidden flex-1 flex flex-col">
+              <div className="overflow-x-auto">
+                <table className="min-w-max w-full text-left text-xs sm:text-sm whitespace-nowrap border-collapse">
+                  <thead className="bg-slate-200/80 text-slate-800 border-b-2 border-slate-300">
+                    <tr>
+                      <th className="px-2.5 py-3 font-bold text-center border-r border-slate-300">No.</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">구내공사(업체명)</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300 bg-indigo-50/70">구분(직원명)</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300 bg-emerald-50/70">공사구분</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">유치점</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">유치자</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">연락처</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">고객명</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300 bg-blue-50/60">가입번호</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">주소</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">회선수</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">단가</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300 bg-orange-50/70">난개통(+10,000)</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300 bg-slate-100">정산금액</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">개통예정일</th>
+                      <th className="px-3 py-3 font-bold text-center border-r border-slate-300">비고</th>
+                      <th className="px-3 py-3 font-bold text-center">관리 (사진·엑셀·PDF)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {filteredRecords.map((record, index) => (
+                      <tr key={record.id} className={record.isHighlighted ? 'bg-yellow-100/90' : 'hover:bg-blue-50/50 even:bg-slate-50/60'}>
+                        <td className="px-2.5 py-2.5 text-center border-r border-slate-200">{record.seq || (index + 1)}</td>
+                        <td className="px-3 py-2.5 text-center border-r border-slate-200 font-bold text-blue-800">{record.company}</td>
+                        <td className="px-3 py-2.5 text-center border-r border-slate-200 font-bold text-indigo-900">{record.staffName}</td>
+                        <td className="px-3 py-2.5 text-center border-r border-slate-200 font-bold text-emerald-800">{record.workType || '단체형IPTV'}</td>
+                        <td className="px-3 py-2.5 text-center border-r border-slate-200">{record.branch || '-'}</td>
+                        <td className="px-3 py-2.5 text-center border-r border-slate-200">{record.manager || '-'}</td>
+                        <td className="px-3 py-2.5 text-center font-mono border-r border-slate-200">{isMasked ? maskPhone(record.contact) : (record.contact || '-')}</td>
+                        <td className="px-3 py-2.5 font-bold border-r border-slate-200">{record.customer}</td>
+                        <td className="px-3 py-2.5 text-center font-mono font-semibold text-blue-900 border-r border-slate-200">{isMasked ? maskSubNumber(record.subNumber) : (record.subNumber || '-')}</td>
+                        <td className="px-3 py-2.5 border-r border-slate-200 max-w-xs truncate">{isMasked ? maskAddress(record.address) : record.address}</td>
+                        <td className="px-3 py-2.5 text-center font-bold border-r border-slate-200">{record.lines}</td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold border-r border-slate-200">{getEffectiveUnitPrice(record).toLocaleString()}원</td>
+                        <td className="px-3 py-2.5 text-center border-r border-slate-200">
+                          <input type="checkbox" checked={Boolean(record.isDifficult)} onChange={() => handleToggleDifficult(record)} className="w-4 h-4 cursor-pointer" />
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold text-blue-900 border-r border-slate-200">{getRecordTotalPrice(record).toLocaleString()}원</td>
+                        <td className="px-3 py-2.5 text-center border-r border-slate-200">{record.scheduledDate}</td>
+                        <td className="px-2.5 py-2 text-center border-r border-slate-200">
+                          <select
+                            value={record.remarks || '개통예정'}
+                            onChange={(e) => handleQuickRemarksChange(record, e.target.value)}
+                            className={`px-2 py-1 rounded text-xs font-bold border ${getRemarksBadgeStyle(record.remarks)}`}
+                          >
+                            {REMARKS_STATUS_LIST.map(st => <option key={st} value={st} className="bg-white text-slate-800">{st}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-2.5 py-2 text-center">
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => { setAttachmentModalRecordId(record.id); setAttachmentNotice({ type: '', message: '' }); }}
+                              className="px-2 py-1 rounded text-xs font-bold bg-slate-100 hover:bg-blue-50 text-slate-700 border border-slate-300"
+                            >
+                              첨부 ({(record.attachments || []).length})
+                            </button>
+                            <button onClick={() => handleOpenModal(record)} className="p-1.5 text-slate-500 hover:text-blue-600"><Edit2 className="w-4 h-4" /></button>
+                            <button onClick={() => handleDelete(record.id)} className="p-1.5 text-slate-500 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </main>
+
+          {/* Password Modal */}
+          {showPasswordModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60">
+              <div className="bg-white rounded-xl shadow-xl w-full max-w-sm overflow-hidden">
+                <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center">
+                  <h3 className="text-base font-bold">보안 인증 (마스킹 해제)</h3>
+                  <button onClick={() => setShowPasswordModal(false)}><X className="w-5 h-5" /></button>
+                </div>
+                <form onSubmit={handlePasswordSubmit} className="p-6">
+                  <input
+                    type="password"
+                    autoFocus
+                    placeholder="관리자 비밀번호 입력"
+                    value={passwordInput}
+                    onChange={(e) => { setPasswordInput(e.target.value); setPasswordError(''); }}
+                    className="w-full px-4 py-2.5 border rounded-lg mb-2 text-center"
+                  />
+                  {passwordError && <p className="text-red-500 text-xs text-center mb-2">{passwordError}</p>}
+                  <div className="mt-4 flex justify-end gap-2">
+                    <button type="button" onClick={() => setShowPasswordModal(false)} className="px-4 py-2 text-sm border rounded-lg">취소</button>
+                    <button type="submit" className="px-5 py-2 text-sm bg-blue-600 text-white rounded-lg font-bold">잠금 해제</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Add/Edit Modal */}
+          {isModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 overflow-y-auto">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden my-8">
+                <div className="px-6 py-4 bg-slate-800 text-white flex justify-between items-center">
+                  <h2 className="text-lg font-bold">{editingId ? '구내공사 내역 수정' : '신규 구내공사 내역 등록'}</h2>
+                  <button onClick={handleCloseModal}><X className="w-5 h-5" /></button>
+                </div>
+                <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700">No. (순번)</label>
+                      <input type="number" name="seq" value={formData.seq} onChange={handleChange} required className="w-full px-3 py-2 text-sm border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-blue-700">구내공사 (업체명)</label>
+                      <select name="company" value={formData.company} onChange={handleChange} className="w-full px-3 py-2 text-sm border rounded-lg font-bold">
+                        {availableCompanies.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-indigo-700">구분 (담당 직원)</label>
+                      <select name="staffName" value={formData.staffName} onChange={handleChange} disabled={!isAdmin} className="w-full px-3 py-2 text-sm border rounded-lg font-bold">
+                        {STAFF_LIST.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700">유치점</label>
+                      <input type="text" name="branch" value={formData.branch} onChange={handleChange} required className="w-full px-3 py-2 text-sm border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700">유치자</label>
+                      <input type="text" name="manager" value={formData.manager} onChange={handleChange} className="w-full px-3 py-2 text-sm border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700">연락처</label>
+                      <input type="text" name="contact" value={formData.contact} onChange={handleChange} className="w-full px-3 py-2 text-sm border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700">고객명</label>
+                      <input type="text" name="customer" value={formData.customer} onChange={handleChange} required className="w-full px-3 py-2 text-sm border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-blue-700">가입번호</label>
+                      <input type="text" name="subNumber" value={formData.subNumber} onChange={handleChange} required className="w-full px-3 py-2 text-sm border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700">회선수</label>
+                      <input type="number" name="lines" value={formData.lines} onChange={handleChange} required className="w-full px-3 py-2 text-sm border rounded-lg" />
+                    </div>
+                    <div className="md:col-span-3">
+                      <label className="text-xs font-bold text-slate-700">주소</label>
+                      <input type="text" name="address" value={formData.address} onChange={handleChange} required className="w-full px-3 py-2 text-sm border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700">개통예정일</label>
+                      <input type="text" name="scheduledDate" value={formData.scheduledDate} onChange={handleChange} required className="w-full px-3 py-2 text-sm border rounded-lg" placeholder="YYYY-MM-DD" />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700">비고 (정산상태)</label>
+                      <select name="remarks" value={formData.remarks} onChange={handleChange} className="w-full px-3 py-2 text-sm border rounded-lg font-bold">
+                        {REMARKS_STATUS_LIST.map(st => <option key={st} value={st}>{st}</option>)}
+                      </select>
+                    </div>
+                    <div className="flex items-end">
+                      <label className="flex items-center gap-2 px-3 py-2 border rounded-lg w-full bg-orange-50 cursor-pointer">
+                        <input type="checkbox" name="isDifficult" checked={Boolean(formData.isDifficult)} onChange={handleChange} />
+                        <span className="text-xs font-bold">난개통 (+10,000원)</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div className="flex justify-end gap-2 pt-4 border-t">
+                    <button type="button" onClick={handleCloseModal} className="px-4 py-2 text-sm border rounded-lg">취소</button>
+                    <button type="submit" className="px-5 py-2 text-sm bg-blue-600 text-white font-bold rounded-lg">저장하기</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Member Approval Modal */}
+          {isMemberModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 overflow-y-auto">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden my-8">
+                <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center">
+                  <h2 className="text-base font-bold">회원가입 승인 및 계정 관리</h2>
+                  <button onClick={() => setIsMemberModalOpen(false)}><X className="w-5 h-5" /></button>
+                </div>
+                <div className="p-6 overflow-x-auto">
+                  <table className="w-full text-left text-xs sm:text-sm whitespace-nowrap">
+                    <thead className="bg-slate-100 border-b">
+                      <tr>
+                        <th className="p-2.5">상태</th>
+                        <th className="p-2.5">아이디</th>
+                        <th className="p-2.5">이름</th>
+                        <th className="p-2.5">권한</th>
+                        <th className="p-2.5 text-center">승인 처리</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {members.map(m => (
+                        <tr key={m.id || m.username}>
+                          <td className="p-2.5 font-bold">{m.status === 'approved' ? '승인완료' : m.status === 'pending' ? '승인대기' : '반려'}</td>
+                          <td className="p-2.5 font-mono">{m.username}</td>
+                          <td className="p-2.5 font-bold">{m.name}</td>
+                          <td className="p-2.5">
+                            {m.username === 'ent2103' ? '대표 관리자' : (
+                              <select value={m.role || 'member'} onChange={(e) => handleUpdateMemberRole(m.id, e.target.value)} className="border rounded px-2 py-1 text-xs">
+                                <option value="member">일반 모드</option>
+                                <option value="admin">관리자 모드</option>
+                              </select>
+                            )}
+                          </td>
+                          <td className="p-2.5 text-center space-x-1">
+                            {m.username !== 'ent2103' && m.status !== 'approved' && (
+                              <>
+                                <button onClick={() => handleUpdateMemberStatus(m.id, 'approved', 'member')} className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-bold">일반 승인</button>
+                                <button onClick={() => handleUpdateMemberStatus(m.id, 'approved', 'admin')} className="px-2 py-1 bg-indigo-600 text-white rounded text-xs font-bold">관리자 승인</button>
+                              </>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Attachment Modal */}
+          {activeAttachmentRecord && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 overflow-y-auto">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden my-8">
+                <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center">
+                  <h3 className="text-base font-bold">[{activeAttachmentRecord.customer}] 첨부파일 관리 (사진·엑셀·PDF)</h3>
+                  <button onClick={() => setAttachmentModalRecordId(null)}><X className="w-5 h-5" /></button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <label className="cursor-pointer block p-4 border-2 border-dashed border-blue-300 rounded-xl bg-blue-50/40 text-center">
+                    <span className="text-sm font-bold text-blue-900">+ 클릭하여 사진(JPG/PNG), 엑셀(XLSX/CSV), PDF 파일 첨부</span>
+                    <input type="file" multiple accept="image/*,.xlsx,.xls,.csv,.pdf" onChange={(e) => handleDirectRecordAttachmentUpload(e, activeAttachmentRecord)} className="hidden" />
+                  </label>
+                  <div className="space-y-2">
+                    {(activeAttachmentRecord.attachments || []).map(att => (
+                      <div key={att.id} className="flex items-center justify-between p-3 border rounded-xl">
+                        <span className="text-xs font-bold truncate">{att.name} ({formatFileSize(att.size)})</span>
+                        <div className="flex gap-1.5">
+                          <button onClick={() => handleDownloadAttachment(att)} className="px-2.5 py-1 bg-blue-600 text-white rounded text-xs font-bold">다운로드</button>
+                          <button onClick={() => handleDeleteRecordAttachment(activeAttachmentRecord, att.id)} className="px-2 py-1 bg-red-50 text-red-600 rounded text-xs font-bold">삭제</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Share Notice Modal */}
+          {isShareModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden">
+                <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center">
+                  <h3 className="text-base font-bold">직원 공유 및 GitHub 단독 파일 배포 안내</h3>
+                  <button onClick={() => setIsShareModalOpen(false)}><X className="w-5 h-5" /></button>
+                </div>
+                <div className="p-6 space-y-4 text-xs sm:text-sm text-slate-700">
+                  <p className="leading-relaxed">
+                    지금 생성된 <strong>index.html</strong> 파일 1개만 GitHub 저장소에 올리거나 직원들에게 전달하면 별도 설치 없이 즉시 실행됩니다.
+                  </p>
+                  <button onClick={handleCopyShareNotice} className="w-full py-2.5 bg-blue-600 text-white font-bold rounded-lg">
+                    {copySuccess ? '복사 완료!' : '단톡방 공지문구 복사하기'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
