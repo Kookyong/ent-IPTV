@@ -249,15 +249,8 @@
       });
       const [loading, setLoading] = useState(hasCloudFirebase);
       
-      // App Auth & Member Approval States (새로고침 시에도 로그인 세션 유지)
-      const [currentMember, setCurrentMember] = useState(() => {
-        try {
-          const saved = localStorage.getItem(STORAGE_KEY_SESSION);
-          return saved ? JSON.parse(saved) : null;
-        } catch (e) {
-          return null;
-        }
-      });
+      // 도메인 접속 시 항상 로그인 창이 먼저 나오도록 초기 상태를 null(비로그인)로 설정
+      const [currentMember, setCurrentMember] = useState(null);
       const [authTab, setAuthTab] = useState('LOGIN');
       const [loginForm, setLoginForm] = useState({ username: '', password: '' });
       const [signupForm, setSignupForm] = useState({
@@ -555,16 +548,12 @@
         }
       };
 
-      // 로그인 세션 영구 유지
+      // 도메인 접속 시 자동 로그인 방지를 위해 기존 저장된 로그인 세션 초기화
       useEffect(() => {
         try {
-          if (currentMember) {
-            localStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(currentMember));
-          } else {
-            localStorage.removeItem(STORAGE_KEY_SESSION);
-          }
+          localStorage.removeItem(STORAGE_KEY_SESSION);
         } catch (e) {}
-      }, [currentMember]);
+      }, []);
 
       // 외부 호스팅/모바일-PC 간 3초 주기 실시간 자동 동기화 폴링 + WebSocket 실시간 수신
       useEffect(() => {
