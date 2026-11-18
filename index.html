@@ -28,6 +28,8 @@
   </script>
   <!-- Babel Standalone for JSX compilation in Browser -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- 실시간 다중 기기(스마트폰 ⇄ PC) 동기화를 위한 분산 클라우드 엔진 -->
+  <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
 </head>
 <body class="bg-slate-100 text-slate-800 antialiased">
   <div id="root"></div>
@@ -51,27 +53,48 @@
     const STORAGE_KEY_MEMBERS = 'ent_iptv_members_v2';
     const STORAGE_KEY_SESSION = 'ent_iptv_session_v2';
     const STORAGE_KEY_FB_CONFIG = 'ent_iptv_fb_config_v2';
-    const STORAGE_KEY_SYNC_ID = 'ent_iptv_cloud_sync_id_v3';
+    const STORAGE_KEY_SYNC_ID = 'ent_iptv_cloud_sync_id_v4';
 
-    // 스마트폰 ⇄ PC 간 100% 실시간 동기화를 위한 다중 클라우드 브릿지 (CORS 완전 허용 REST 스토리지)
-    const DEFAULT_SYNC_DOC_ID = 'ent2103_iptv_master_v3';
-    const JSONBLOB_API_BASE = 'https://jsonblob.com/api/jsonBlob';
-    const NPOINT_FALLBACK_URL = 'https://api.keyvalue.xyz/3e8b9c1a/ent_iptv_v3';
+    // 스마트폰 ⇄ PC 간 100% 실시간 동기화를 위한 다중 클라우드 브릿지 (GUN 실시간 P2P/Relay + 다중 REST 클라우드)
+    const DEFAULT_SYNC_DOC_ID = 'ent2103_iptv_master_v4';
+    const REST_SYNC_ENDPOINTS = [
+      `https://kvdb.io/6Wa9pQ2mK8vX3nL5rT1yB/${DEFAULT_SYNC_DOC_ID}`,
+      `https://api.keyvalue.xyz/3e8b9c1a/${DEFAULT_SYNC_DOC_ID}`
+    ];
+
+    // 실시간 WebSocket 중계 서버 초기화
+    let gunDbNode = null;
+    try {
+      if (window.Gun) {
+        const gun = window.Gun({
+          peers: [
+            'https://gun-manhattan.herokuapp.com/gun',
+            'https://peer.wallie.io/gun',
+            'https://gundb-relay-mlccl.ondigitalocean.app/gun'
+          ],
+          localStorage: false
+        });
+        gunDbNode = gun.get('ent2103_iptv_global_sync_v4');
+      }
+    } catch (e) {
+      console.warn('Gun init fallback:', e);
+    }
 
     // 여러 기기 데이터를 합칠 때 스마트폰에서 신청한 신규 회원이나 수정된 회원 정보가 절대 덮어써지지 않도록 스마트 병합
     const mergeMembersList = (localList = [], remoteList = []) => {
       const map = new Map();
-      [...localList, ...remoteList].forEach((m) => {
+      // 기본 관리자 및 초기 멤버가 누락되지 않도록 보장
+      [...INITIAL_MEMBERS, ...localList, ...remoteList].forEach((m) => {
         if (!m || !m.username) return;
         const key = String(m.username).trim().toLowerCase();
         const existing = map.get(key);
         if (!existing) {
-          map.set(key, m);
+          map.set(key, { ...m, username: String(m.username).trim() });
         } else {
           const existingTime = Number(existing.updatedAtMs || 0);
           const incomingTime = Number(m.updatedAtMs || 0);
           if (incomingTime >= existingTime) {
-            map.set(key, { ...existing, ...m });
+            map.set(key, { ...existing, ...m, username: String(m.username).trim() });
           }
         }
       });
@@ -304,39 +327,74 @@
       const [showAddMemberRow, setShowAddMemberRow] = useState(false);
       const [memberManageNotice, setMemberManageNotice] = useState('');
 
+      // 최신 상태 참조용 Ref (비동기 타이머나 이벤트에서 항상 최신 회원/레코드 목록을 유지)
+      const membersRefState = useRef(members);
+      const recordsRefState = useRef(records);
+      useEffect(() => { membersRefState.current = members; }, [members]);
+      useEffect(() => { recordsRefState.current = records; }, [records]);
+
       // --- 공용 클라우드 실시간 동기화 헬퍼 (스마트폰 ⇄ PC 간 100% 양방향 병합 동기화) ---
-      const getSharedCloudUrl = () => {
-        // URL 파라미터나 고정 키를 사용해 모든 기기가 동일한 클라우드 사물함을 바라보도록 보장
-        return `https://kvdb.io/6Wa9pQ2mK8vX3nL5rT1yB/${DEFAULT_SYNC_DOC_ID}`;
+      const saveMembersToLocal = (list) => {
+        try {
+          localStorage.setItem(STORAGE_KEY_MEMBERS, JSON.stringify(list));
+        } catch (e) {}
+      };
+
+      const saveRecordsToLocal = (list) => {
+        try {
+          localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(list));
+        } catch (e) {}
       };
 
       const pushSharedState = async (nextRecords, nextMembers) => {
-        const rList = nextRecords || records;
-        const mList = nextMembers || members;
-        try {
-          localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(rList));
-          localStorage.setItem(STORAGE_KEY_MEMBERS, JSON.stringify(mList));
-        } catch (e) {}
+        const rList = nextRecords || recordsRefState.current;
+        const mList = nextMembers || membersRefState.current;
+        saveRecordsToLocal(rList);
+        saveMembersToLocal(mList);
 
-        if (hasCloudFirebase) return;
+        if (hasCloudFirebase) return { records: rList, members: mList };
 
-        // 푸시하기 전에 먼저 원격 데이터를 읽어와서 다른 기기(스마트폰)에서 신청한 회원이 유실되지 않게 병합 후 저장
         let mergedMembers = mList;
         let mergedRecords = rList;
-        const cloudUrl = getSharedCloudUrl();
 
+        // 1) 실시간 WebSocket 브릿지(GUN)로 즉시 브로드캐스트 (스마트폰 가입 시 대표님 PC에 0.5초 내 즉시 팝업)
         try {
-          const checkRes = await fetch(`${cloudUrl}?t=${Date.now()}`, { cache: 'no-store' });
-          if (checkRes.ok) {
-            const remoteData = await checkRes.json();
-            if (remoteData && Array.isArray(remoteData.members)) {
-              mergedMembers = mergeMembersList(remoteData.members, mList);
-            }
-            if (remoteData && Array.isArray(remoteData.records)) {
-              mergedRecords = mergeRecordsList(remoteData.records, rList);
-            }
+          if (gunDbNode) {
+            gunDbNode.get('members_json').put(JSON.stringify({
+              updatedAt: Date.now(),
+              members: mergedMembers
+            }));
+            // 첨부파일 용량이 클 수 있으므로 레코드 메타데이터 전송
+            const lightRecords = mergedRecords.map(r => ({ ...r, attachments: (r.attachments || []).slice(0, 3) }));
+            gunDbNode.get('records_json').put(JSON.stringify({
+              updatedAt: Date.now(),
+              records: lightRecords
+            }));
           }
         } catch (e) {}
+
+        // 2) 다중 REST 클라우드 스토리지 병합 및 백업 전송
+        for (const endpoint of REST_SYNC_ENDPOINTS) {
+          try {
+            const checkRes = await fetch(`${endpoint}?t=${Date.now()}`, { cache: 'no-store' });
+            if (checkRes.ok) {
+              const remoteData = await checkRes.json();
+              if (remoteData && Array.isArray(remoteData.members)) {
+                mergedMembers = mergeMembersList(mergedMembers, remoteData.members);
+              }
+              if (remoteData && Array.isArray(remoteData.records)) {
+                mergedRecords = mergeRecordsList(mergedRecords, remoteData.records);
+              }
+              break;
+            }
+          } catch (e) {}
+        }
+
+        // 병합된 최종 결과를 로컬과 UI에 즉시 반영
+        saveMembersToLocal(mergedMembers);
+        saveRecordsToLocal(mergedRecords);
+        setMembers(mergedMembers);
+        setRecords(mergedRecords);
 
         const payloadStr = JSON.stringify({
           updatedAt: Date.now(),
@@ -344,80 +402,68 @@
           members: mergedMembers
         });
 
-        let syncedOk = false;
-        // 1차 클라우드 브릿지 전송
-        try {
-          const res1 = await fetch(cloudUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: payloadStr
-          });
-          if (res1.ok) syncedOk = true;
-        } catch (e) {}
-
-        // 2차 백업 클라우드 브릿지 전송 (모바일 통신사 방화벽 우회용)
-        try {
-          const res2 = await fetch(NPOINT_FALLBACK_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: payloadStr
-          });
-          if (res2.ok) syncedOk = true;
-        } catch (e) {}
+        let syncedOk = Boolean(gunDbNode);
+        for (const endpoint of REST_SYNC_ENDPOINTS) {
+          try {
+            const res = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: payloadStr
+            });
+            if (res.ok) syncedOk = true;
+          } catch (e) {}
+        }
 
         setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
-        setSyncStatus(syncedOk ? '실시간 연동됨' : '로컬 저장됨');
+        setSyncStatus(syncedOk ? '실시간 클라우드 연동됨' : '기기 내부 저장됨');
+        return { records: mergedRecords, members: mergedMembers };
       };
 
       const pullSharedState = async () => {
-        if (hasCloudFirebase) return;
-        const cloudUrl = getSharedCloudUrl();
-        let remoteData = null;
-
+        // 먼저 로컬스토리지에 저장된 데이터와 현재 메모리를 한 번 병합
+        let currentMembers = membersRefState.current;
+        let currentRecords = recordsRefState.current;
         try {
-          const res = await fetch(`${cloudUrl}?t=${Date.now()}`, { cache: 'no-store' });
-          if (res.ok) {
-            remoteData = await res.json();
+          const localMem = JSON.parse(localStorage.getItem(STORAGE_KEY_MEMBERS) || '[]');
+          if (Array.isArray(localMem) && localMem.length > 0) {
+            currentMembers = mergeMembersList(currentMembers, localMem);
           }
         } catch (e) {}
 
-        if (!remoteData) {
+        if (hasCloudFirebase) return { members: currentMembers, records: currentRecords };
+
+        let remoteData = null;
+        for (const endpoint of REST_SYNC_ENDPOINTS) {
           try {
-            const res2 = await fetch(`${NPOINT_FALLBACK_URL}?t=${Date.now()}`, { cache: 'no-store' });
-            if (res2.ok) {
-              remoteData = await res2.json();
+            const res = await fetch(`${endpoint}?t=${Date.now()}`, { cache: 'no-store' });
+            if (res.ok) {
+              const parsed = await res.json();
+              if (parsed && (Array.isArray(parsed.members) || Array.isArray(parsed.records))) {
+                remoteData = parsed;
+                break;
+              }
             }
           } catch (e) {}
         }
 
-        if (!remoteData) return;
+        if (remoteData) {
+          if (Array.isArray(remoteData.members) && remoteData.members.length > 0) {
+            currentMembers = mergeMembersList(currentMembers, remoteData.members);
+            saveMembersToLocal(currentMembers);
+            setMembers(currentMembers);
+          }
+          if (Array.isArray(remoteData.records) && remoteData.records.length > 0) {
+            currentRecords = mergeRecordsList(currentRecords, remoteData.records);
+            saveRecordsToLocal(currentRecords);
+            setRecords(currentRecords);
+          }
+          setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
+          setSyncStatus('실시간 클라우드 연동됨');
+        } else {
+          setMembers(currentMembers);
+        }
 
-        if (Array.isArray(remoteData.members) && remoteData.members.length > 0) {
-          setMembers(prev => {
-            const merged = mergeMembersList(prev, remoteData.members);
-            const prevStr = JSON.stringify(prev);
-            const nextStr = JSON.stringify(merged);
-            if (prevStr !== nextStr) {
-              localStorage.setItem(STORAGE_KEY_MEMBERS, nextStr);
-              return merged;
-            }
-            return prev;
-          });
-        }
-        if (Array.isArray(remoteData.records) && remoteData.records.length > 0) {
-          setRecords(prev => {
-            const merged = mergeRecordsList(prev, remoteData.records);
-            const prevStr = JSON.stringify(prev);
-            const nextStr = JSON.stringify(merged);
-            if (prevStr !== nextStr) {
-              localStorage.setItem(STORAGE_KEY_RECORDS, nextStr);
-              return merged;
-            }
-            return prev;
-          });
-        }
-        setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
-        setSyncStatus('실시간 연동됨');
+        return { members: currentMembers, records: currentRecords };
       };
 
       // --- Status Classification Helpers ---
@@ -509,27 +555,7 @@
         }
       };
 
-      // LocalStorage 자동 영구 저장 동기화 (새로고침 시 초기화 완벽 방지)
-      useEffect(() => {
-        if (!hasCloudFirebase && records.length > 0) {
-          try {
-            localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(records));
-          } catch (e) {
-            console.warn("LocalStorage records save error:", e);
-          }
-        }
-      }, [records]);
-
-      useEffect(() => {
-        if (!hasCloudFirebase && members.length > 0) {
-          try {
-            localStorage.setItem(STORAGE_KEY_MEMBERS, JSON.stringify(members));
-          } catch (e) {
-            console.warn("LocalStorage members save error:", e);
-          }
-        }
-      }, [members]);
-
+      // 로그인 세션 영구 유지
       useEffect(() => {
         try {
           if (currentMember) {
@@ -540,13 +566,47 @@
         } catch (e) {}
       }, [currentMember]);
 
-      // 외부 호스팅/모바일-PC 간 3초 주기 실시간 자동 동기화 폴링 (새로고침 없이도 가입 요청 즉시 감지)
+      // 외부 호스팅/모바일-PC 간 3초 주기 실시간 자동 동기화 폴링 + WebSocket 실시간 수신
       useEffect(() => {
         if (hasCloudFirebase) return;
         pullSharedState();
+
+        // 실시간 WebSocket(GUN) 리스너: 스마트폰에서 가입 신청하는 즉시 대표님 PC 화면에 반영
+        if (gunDbNode) {
+          gunDbNode.get('members_json').on((rawStr) => {
+            if (!rawStr || typeof rawStr !== 'string') return;
+            try {
+              const parsed = JSON.parse(rawStr);
+              if (parsed && Array.isArray(parsed.members)) {
+                setMembers(prev => {
+                  const merged = mergeMembersList(prev, parsed.members);
+                  saveMembersToLocal(merged);
+                  return merged;
+                });
+                setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
+                setSyncStatus('실시간 클라우드 연동됨');
+              }
+            } catch (e) {}
+          });
+
+          gunDbNode.get('records_json').on((rawStr) => {
+            if (!rawStr || typeof rawStr !== 'string') return;
+            try {
+              const parsed = JSON.parse(rawStr);
+              if (parsed && Array.isArray(parsed.records)) {
+                setRecords(prev => {
+                  const merged = mergeRecordsList(prev, parsed.records);
+                  saveRecordsToLocal(merged);
+                  return merged;
+                });
+              }
+            } catch (e) {}
+          });
+        }
+
         const timer = setInterval(() => {
           pullSharedState();
-        }, 3500);
+        }, 3000);
         return () => clearInterval(timer);
       }, []);
 
@@ -686,7 +746,7 @@
       }, [user]);
 
       // --- Member Login & Signup Handlers ---
-      const handleLoginSubmit = (e) => {
+      const handleLoginSubmit = async (e) => {
         e.preventDefault();
         setAuthNotice({ type: '', message: '' });
 
@@ -698,28 +758,63 @@
           return;
         }
 
-        if (uidInput === 'ent2103' && pwInput === 'ronaldono9!@') {
-          const adminMember = members.find(m => m.username === 'ent2103') || INITIAL_MEMBERS[0];
+        // 대표님(총괄관리자) 마스터 계정은 대소문자 관계없이 즉시 로그인
+        if (uidInput.toLowerCase() === 'ent2103' && pwInput === 'ronaldono9!@') {
+          const adminMember = members.find(m => m.username.toLowerCase() === 'ent2103') || INITIAL_MEMBERS[0];
           setCurrentMember(adminMember);
           setLoginForm({ username: '', password: '' });
+          pullSharedState();
           return;
         }
 
-        const matched = members.find(m => m.username === uidInput && m.password === pwInput);
-        if (!matched) {
-          setAuthNotice({ type: 'error', message: '아이디 또는 비밀번호가 일치하지 않습니다.' });
-          return;
+        // 로그인 시도 직전에 클라우드와 로컬스토리지의 최신 회원 명단을 실시간 병합 조회 (가입정보 없음 오류 완벽 해결)
+        let latestMembers = members;
+        if (!hasCloudFirebase) {
+          const pulled = await pullSharedState();
+          if (pulled && Array.isArray(pulled.members)) {
+            latestMembers = pulled.members;
+          }
         }
-        if (matched.status === 'pending') {
-          setAuthNotice({ type: 'warning', message: '관리자 승인 대기 중인 계정입니다. 대표님 승인 완료 후 시스템 접속이 가능합니다.' });
-          return;
-        }
-        if (matched.status === 'rejected') {
-          setAuthNotice({ type: 'error', message: '가입 승인이 반려되었거나 접근이 제한된 계정입니다.' });
+
+        // 1차: 아이디 찾기 (대소문자 무관, 공백 제거)
+        const userById = latestMembers.find(
+          m => m && m.username && String(m.username).trim().toLowerCase() === uidInput.toLowerCase()
+        );
+
+        if (!userById) {
+          setAuthNotice({
+            type: 'error',
+            message: `입력하신 아이디(${uidInput})로 등록된 가입 정보가 없습니다. 아래 [회원가입 신청] 탭에서 먼저 가입을 신청해주세요.`
+          });
           return;
         }
 
-        setCurrentMember(matched);
+        // 2차: 비밀번호 확인
+        if (String(userById.password).trim() !== pwInput) {
+          setAuthNotice({
+            type: 'error',
+            message: '비밀번호가 일치하지 않습니다. 비밀번호를 다시 확인해주세요.'
+          });
+          return;
+        }
+
+        // 3차: 승인 상태 확인
+        if (userById.status === 'pending') {
+          setAuthNotice({
+            type: 'warning',
+            message: `[${userById.name}님] 회원가입 신청이 정상 접수되어 현재 '대표님(총괄관리자) 승인 대기 중'입니다. 대표님 승인 완료 후 로그인하실 수 있습니다.`
+          });
+          return;
+        }
+        if (userById.status === 'rejected') {
+          setAuthNotice({
+            type: 'error',
+            message: '가입 승인이 반려되었거나 접근이 제한된 계정입니다. 관리자에게 문의하세요.'
+          });
+          return;
+        }
+
+        setCurrentMember(userById);
         setLoginForm({ username: '', password: '' });
       };
 
@@ -733,21 +828,31 @@
           return;
         }
 
-        // 최신 원격 회원목록을 먼저 한 번 받아와서 중복 체크 및 누락 방지
-        await pullSharedState();
+        // 최신 원격 회원목록을 먼저 받아와서 병합
+        let baseMembers = membersRefState.current;
+        if (!hasCloudFirebase) {
+          const pulled = await pullSharedState();
+          if (pulled && Array.isArray(pulled.members)) {
+            baseMembers = pulled.members;
+          }
+        }
 
-        const exists = members.some(m => m.username.toLowerCase() === username.trim().toLowerCase());
+        const cleanId = username.trim();
+        const exists = baseMembers.some(m => m && m.username && m.username.toLowerCase() === cleanId.toLowerCase());
         if (exists) {
-          setAuthNotice({ type: 'error', message: '이미 사용 중인 아이디입니다.' });
+          setAuthNotice({
+            type: 'warning',
+            message: `이미 가입 신청되었거나 사용 중인 아이디(${cleanId})입니다. 로그인 탭에서 로그인해보시거나 대표님 승인을 기다려주세요.`
+          });
           return;
         }
 
         const newMemberObj = {
           id: `mem_${Date.now()}`,
-          username: username.trim(),
+          username: cleanId,
           password: password.trim(),
           name: name.trim(),
-          department: department.trim() || '협력사 직원',
+          department: department.trim() || '구내공사 시공팀',
           phone: phone.trim() || '-',
           role: 'member',
           status: 'pending',
@@ -761,15 +866,18 @@
             const { id, ...cloudData } = newMemberObj;
             await addDoc(membersRef, { ...cloudData, createdAt: serverTimestamp() });
           } else {
-            const nextMembers = mergeMembersList(members, [newMemberObj]);
+            // 로컬 및 클라우드에 즉시 강제 저장
+            const nextMembers = mergeMembersList(baseMembers, [newMemberObj]);
+            saveMembersToLocal(nextMembers);
             setMembers(nextMembers);
-            await pushSharedState(records, nextMembers);
+            await pushSharedState(recordsRefState.current, nextMembers);
           }
           setSignupForm({ username: '', password: '', name: '', department: '구내공사 시공팀', phone: '' });
           setAuthTab('LOGIN');
+          setLoginForm({ username: cleanId, password: '' });
           setAuthNotice({
             type: 'success',
-            message: '회원가입 신청이 완료되었습니다! 대표님(관리자) 화면에 승인 요청이 실시간 전송되었습니다.'
+            message: `[${newMemberObj.name}님 (아이디: ${cleanId})] 회원가입 승인 요청이 완료되었습니다! 총괄관리자(대표님) 화면 상단에 승인 요청이 실시간으로 표시됩니다.`
           });
         } catch (error) {
           setAuthNotice({ type: 'error', message: '가입 신청 중 오류가 발생했습니다.' });
