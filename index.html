@@ -51,6 +51,8 @@
     const STORAGE_KEY_MEMBERS = 'ent_iptv_members_v2';
     const STORAGE_KEY_SESSION = 'ent_iptv_session_v2';
     const STORAGE_KEY_FB_CONFIG = 'ent_iptv_fb_config_v2';
+    // 외부 호스팅(GitHub/Vercel 등)에서도 별도 설정 없이 전 직원 PC·휴대폰이 즉시 실시간 공유되도록 공용 클라우드 브릿지 적용
+    const CLOUD_SYNC_ENDPOINT = 'https://kvdb.io/A6Xy9kL2mP8qR4wZ7vB3nJ/ent_iptv_shared_v2';
 
     const getSavedFirebaseConfig = () => {
       try {
@@ -233,6 +235,65 @@
       const [showPasswordModal, setShowPasswordModal] = useState(false);
       const [passwordInput, setPasswordInput] = useState('');
       const [passwordError, setPasswordError] = useState('');
+      const [lastSyncedAt, setLastSyncedAt] = useState('');
+
+      // --- 공용 클라우드 실시간 동기화 헬퍼 (외부 GitHub/단독 호스팅에서도 기기 간 즉시 공유) ---
+      const pushSharedState = async (nextRecords, nextMembers) => {
+        const rList = nextRecords || records;
+        const mList = nextMembers || members;
+        try {
+          localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(rList));
+          localStorage.setItem(STORAGE_KEY_MEMBERS, JSON.stringify(mList));
+        } catch (e) {}
+
+        if (hasCloudFirebase) return;
+        try {
+          await fetch(CLOUD_SYNC_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              updatedAt: Date.now(),
+              records: rList,
+              members: mList
+            })
+          });
+          setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
+        } catch (e) {
+          // 오프라인이거나 방화벽 환경일 경우 LocalStorage 유지
+        }
+      };
+
+      const pullSharedState = async () => {
+        if (hasCloudFirebase) return;
+        try {
+          const res = await fetch(`${CLOUD_SYNC_ENDPOINT}?t=${Date.now()}`, { cache: 'no-store' });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data && Array.isArray(data.members) && data.members.length > 0) {
+            setMembers(prev => {
+              const prevStr = JSON.stringify(prev);
+              const nextStr = JSON.stringify(data.members);
+              if (prevStr !== nextStr) {
+                localStorage.setItem(STORAGE_KEY_MEMBERS, nextStr);
+                return data.members;
+              }
+              return prev;
+            });
+          }
+          if (data && Array.isArray(data.records) && data.records.length > 0) {
+            setRecords(prev => {
+              const prevStr = JSON.stringify(prev);
+              const nextStr = JSON.stringify(data.records);
+              if (prevStr !== nextStr) {
+                localStorage.setItem(STORAGE_KEY_RECORDS, nextStr);
+                return data.records;
+              }
+              return prev;
+            });
+          }
+          setLastSyncedAt(new Date().toLocaleTimeString('ko-KR'));
+        } catch (e) {}
+      };
 
       // --- Status Classification Helpers ---
       const isCompletedRecord = (r) => (r.remarks || '').trim() === '정산완료';
@@ -353,6 +414,16 @@
           }
         } catch (e) {}
       }, [currentMember]);
+
+      // 외부 호스팅/모바일-PC 간 3초 주기 실시간 자동 동기화 폴링 (새로고침 없이도 가입 요청 즉시 감지)
+      useEffect(() => {
+        if (hasCloudFirebase) return;
+        pullSharedState();
+        const timer = setInterval(() => {
+          pullSharedState();
+        }, 3500);
+        return () => clearInterval(timer);
+      }, []);
 
       // 타 브라우저 탭 간 실시간 동기화 지원
       useEffect(() => {
@@ -559,13 +630,15 @@
             const membersRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_members');
             await addDoc(membersRef, { ...newMemberObj, createdAt: serverTimestamp() });
           } else {
-            setMembers(prev => [...prev, { ...newMemberObj, id: `mem_${Date.now()}` }]);
+            const nextMembers = [...members, { ...newMemberObj, id: `mem_${Date.now()}` }];
+            setMembers(nextMembers);
+            await pushSharedState(records, nextMembers);
           }
           setSignupForm({ username: '', password: '', name: '', department: '구내공사 시공팀', phone: '' });
           setAuthTab('LOGIN');
           setAuthNotice({
             type: 'success',
-            message: '회원가입 신청이 접수되었습니다! 대표님(관리자) 승인 후 로그인하실 수 있습니다.'
+            message: '회원가입 신청이 접수되었습니다! 대표님(관리자) 화면 상단에 승인 요청 알림이 전송되었습니다.'
           });
         } catch (error) {
           setAuthNotice({ type: 'error', message: '가입 신청 중 오류가 발생했습니다.' });
@@ -580,7 +653,9 @@
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', memberId);
           await updateDoc(docRef, { ...payload, updatedAt: serverTimestamp() });
         } else {
-          setMembers(prev => prev.map(m => m.id === memberId ? { ...m, ...payload } : m));
+          const nextMembers = members.map(m => m.id === memberId ? { ...m, ...payload } : m);
+          setMembers(nextMembers);
+          await pushSharedState(records, nextMembers);
         }
       };
 
@@ -589,7 +664,9 @@
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', memberId);
           await updateDoc(docRef, { role: newRole, updatedAt: serverTimestamp() });
         } else {
-          setMembers(prev => prev.map(m => m.id === memberId ? { ...m, role: newRole } : m));
+          const nextMembers = members.map(m => m.id === memberId ? { ...m, role: newRole } : m);
+          setMembers(nextMembers);
+          await pushSharedState(records, nextMembers);
         }
       };
 
@@ -598,11 +675,14 @@
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_members', memberId);
           await deleteDoc(docRef);
         } else {
-          setMembers(prev => prev.filter(m => m.id !== memberId));
+          const nextMembers = members.filter(m => m.id !== memberId);
+          setMembers(nextMembers);
+          await pushSharedState(records, nextMembers);
         }
       };
 
-      const pendingMembersCount = useMemo(() => members.filter(m => m.status === 'pending').length, [members]);
+      const pendingMembers = useMemo(() => members.filter(m => m.status === 'pending'), [members]);
+      const pendingMembersCount = pendingMembers.length;
       const isAdmin = currentMember?.role === 'admin';
       const getCleanMemberName = (rawName) => rawName ? String(rawName).trim().split(' ')[0] : '';
 
@@ -839,7 +919,9 @@
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', recordId);
           await updateDoc(docRef, { ...updates, updatedAt: serverTimestamp() });
         } else {
-          setRecords(prev => prev.map(r => r.id === recordId ? { ...r, ...updates } : r));
+          const nextRecords = records.map(r => r.id === recordId ? { ...r, ...updates } : r);
+          setRecords(nextRecords);
+          await pushSharedState(nextRecords, members);
         }
       };
 
@@ -941,7 +1023,9 @@
             const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'iptv_records');
             await addDoc(collectionRef, { ...payload, createdAt: serverTimestamp() });
           } else {
-            setRecords(prev => [...prev, { ...payload, id: `rec_${Date.now()}` }]);
+            const nextRecords = [...records, { ...payload, id: `rec_${Date.now()}` }];
+            setRecords(nextRecords);
+            await pushSharedState(nextRecords, members);
           }
         }
         handleCloseModal();
@@ -969,7 +1053,9 @@
           const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'iptv_records', id);
           await deleteDoc(docRef);
         } else {
-          setRecords(prev => prev.filter(r => r.id !== id));
+          const nextRecords = records.filter(r => r.id !== id);
+          setRecords(nextRecords);
+          await pushSharedState(nextRecords, members);
         }
         setDeleteConfirmId(null);
       };
@@ -1289,6 +1375,69 @@
 
           {/* Main */}
           <main className="flex-1 w-full max-w-screen-2xl mx-auto p-4 sm:p-6 flex flex-col gap-5">
+            {/* 대표님(관리자) 전용: 신규 회원가입 승인 대기 알림 배너 & 즉시 승인 바 */}
+            {isAdmin && pendingMembersCount > 0 && (
+              <div className="bg-indigo-950 text-white rounded-xl p-4 shadow-md border border-indigo-700 flex flex-col gap-3">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 text-xs sm:text-sm">
+                    <span className="p-2 rounded-lg bg-amber-400 text-slate-950 font-extrabold animate-bounce">
+                      <UserPlus className="w-4 h-4" />
+                    </span>
+                    <div>
+                      <span className="font-extrabold text-amber-300 text-sm sm:text-base">
+                        [신규 회원가입 승인 요청 {pendingMembersCount}건]
+                      </span>
+                      <p className="text-xs text-indigo-200 mt-0.5">
+                        아래 신청자의 권한(일반 모드 / 관리자 모드)을 선택해 즉시 승인하실 수 있습니다.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIsMemberModalOpen(true)}
+                    className="px-3.5 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs rounded-lg transition-colors shrink-0"
+                  >
+                    전체 회원승인 관리 열기 →
+                  </button>
+                </div>
+
+                {/* 배너 안에서 바로 원클릭 승인 가능한 대기 목록 */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-2 border-t border-indigo-800/80">
+                  {pendingMembers.map((pm) => (
+                    <div key={pm.id || pm.username} className="flex flex-wrap items-center justify-between gap-2 bg-indigo-900/70 px-3.5 py-2.5 rounded-lg border border-indigo-700 text-xs">
+                      <div>
+                        <span className="font-extrabold text-white text-sm">{pm.name}</span>
+                        <span className="text-amber-300 font-mono ml-1.5">({pm.username})</span>
+                        <span className="text-indigo-200 ml-2">{pm.department} · {pm.phone}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateMemberStatus(pm.id, 'approved', 'member')}
+                          className="px-2.5 py-1 bg-blue-500 hover:bg-blue-400 text-white font-bold rounded transition-colors"
+                        >
+                          일반 승인
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateMemberStatus(pm.id, 'approved', 'admin')}
+                          className="px-2.5 py-1 bg-emerald-500 hover:bg-emerald-400 text-white font-bold rounded transition-colors"
+                        >
+                          관리자 승인
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateMemberStatus(pm.id, 'rejected')}
+                          className="px-2 py-1 bg-red-500/80 hover:bg-red-500 text-white font-bold rounded transition-colors"
+                        >
+                          반려
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Dashboard Cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
               <button
@@ -1627,8 +1776,20 @@
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 overflow-y-auto">
               <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden my-8">
                 <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center">
-                  <h2 className="text-base font-bold">회원가입 승인 및 계정 관리</h2>
-                  <button onClick={() => setIsMemberModalOpen(false)}><X className="w-5 h-5" /></button>
+                  <div className="flex items-center gap-2">
+                    <Users className="w-5 h-5 text-amber-400" />
+                    <h2 className="text-base font-bold">회원가입 승인 및 계정 관리 ({members.length}명)</h2>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={pullSharedState}
+                      className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs rounded-lg border border-slate-700 flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> 요청 새로고침
+                    </button>
+                    <button onClick={() => setIsMemberModalOpen(false)}><X className="w-5 h-5" /></button>
+                  </div>
                 </div>
                 <div className="p-6 overflow-x-auto">
                   <table className="w-full text-left text-xs sm:text-sm whitespace-nowrap">
@@ -1636,30 +1797,51 @@
                       <tr>
                         <th className="p-2.5">상태</th>
                         <th className="p-2.5">아이디</th>
-                        <th className="p-2.5">이름</th>
-                        <th className="p-2.5">권한</th>
-                        <th className="p-2.5 text-center">승인 처리</th>
+                        <th className="p-2.5">이름 / 소속</th>
+                        <th className="p-2.5">연락처</th>
+                        <th className="p-2.5">권한 등급</th>
+                        <th className="p-2.5 text-center">승인 및 관리 처리</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y">
                       {members.map(m => (
-                        <tr key={m.id || m.username}>
-                          <td className="p-2.5 font-bold">{m.status === 'approved' ? '승인완료' : m.status === 'pending' ? '승인대기' : '반려'}</td>
-                          <td className="p-2.5 font-mono">{m.username}</td>
-                          <td className="p-2.5 font-bold">{m.name}</td>
+                        <tr key={m.id || m.username} className={m.status === 'pending' ? 'bg-amber-50' : ''}>
+                          <td className="p-2.5 font-bold">
+                            {m.status === 'approved' && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs">승인완료</span>}
+                            {m.status === 'pending' && <span className="px-2 py-0.5 rounded-full bg-amber-200 text-amber-950 text-xs animate-pulse">승인대기</span>}
+                            {m.status === 'rejected' && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs">반려됨</span>}
+                          </td>
+                          <td className="p-2.5 font-mono font-bold">{m.username}</td>
                           <td className="p-2.5">
-                            {m.username === 'ent2103' ? '대표 관리자' : (
-                              <select value={m.role || 'member'} onChange={(e) => handleUpdateMemberRole(m.id, e.target.value)} className="border rounded px-2 py-1 text-xs">
+                            <div className="font-bold text-slate-900">{m.name}</div>
+                            <div className="text-[11px] text-slate-500">{m.department}</div>
+                          </td>
+                          <td className="p-2.5 font-mono text-xs">{m.phone || '-'}</td>
+                          <td className="p-2.5">
+                            {m.username === 'ent2103' ? (
+                              <span className="px-2 py-1 bg-slate-900 text-amber-300 rounded text-xs font-bold">대표 관리자</span>
+                            ) : (
+                              <select value={m.role || 'member'} onChange={(e) => handleUpdateMemberRole(m.id, e.target.value)} className="border rounded px-2 py-1 text-xs font-bold">
                                 <option value="member">일반 모드</option>
                                 <option value="admin">관리자 모드</option>
                               </select>
                             )}
                           </td>
                           <td className="p-2.5 text-center space-x-1">
-                            {m.username !== 'ent2103' && m.status !== 'approved' && (
+                            {m.username !== 'ent2103' && (
                               <>
-                                <button onClick={() => handleUpdateMemberStatus(m.id, 'approved', 'member')} className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-bold">일반 승인</button>
-                                <button onClick={() => handleUpdateMemberStatus(m.id, 'approved', 'admin')} className="px-2 py-1 bg-indigo-600 text-white rounded text-xs font-bold">관리자 승인</button>
+                                {m.status !== 'approved' && (
+                                  <>
+                                    <button onClick={() => handleUpdateMemberStatus(m.id, 'approved', 'member')} className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold">일반 승인</button>
+                                    <button onClick={() => handleUpdateMemberStatus(m.id, 'approved', 'admin')} className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-bold">관리자 승인</button>
+                                  </>
+                                )}
+                                {m.status !== 'rejected' && (
+                                  <button onClick={() => handleUpdateMemberStatus(m.id, 'rejected')} className="px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded text-xs font-bold">
+                                    {m.status === 'approved' ? '승인취소' : '반려'}
+                                  </button>
+                                )}
+                                <button onClick={() => handleDeleteMember(m.id)} className="px-2 py-1 text-slate-400 hover:text-red-600 text-xs font-bold">삭제</button>
                               </>
                             )}
                           </td>
