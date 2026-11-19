@@ -224,6 +224,7 @@
       const [attachmentModalRecordId, setAttachmentModalRecordId] = useState(null);
       const [uploadingFile, setUploadingFile] = useState(false);
       const [previewAttachment, setPreviewAttachment] = useState(null);
+      const [deletingAttachmentId, setDeletingAttachmentId] = useState(null);
 
       // 마스킹 상태
       const [isMasked, setIsMasked] = useState(true);
@@ -754,6 +755,34 @@
         setRecords(nextRecords);
         broadcastCloudState(nextRecords, members, notices, nextLogs);
         setUploadingFile(false);
+      };
+
+      // 첨부파일 삭제
+      const handleDeleteAttachment = (record, attId) => {
+        if (!record) return;
+        const targetAtt = (record.attachments || []).find(a => a.id === attId);
+        const nextAttachments = (record.attachments || []).filter(a => a.id !== attId);
+        const nextRecords = records.map(r => r.id === record.id ? { ...r, attachments: nextAttachments } : r);
+        const nextLogs = addAuditLog('수정', record.customer, `첨부파일 삭제 (${targetAtt?.name || '파일'})`);
+        setRecords(nextRecords);
+        broadcastCloudState(nextRecords, members, notices, nextLogs);
+        setDeletingAttachmentId(null);
+        if (previewAttachment?.id === attId) setPreviewAttachment(null);
+      };
+
+      const formatFileSize = (bytes) => {
+        if (!bytes) return '';
+        if (bytes < 1024) return `${bytes}B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+      };
+
+      const isImageAttachment = (att) => {
+        return att?.category === 'IMAGE' || String(att?.dataUrl || '').startsWith('data:image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(att?.name || '');
+      };
+
+      const isPdfAttachment = (att) => {
+        return att?.category === 'PDF' || String(att?.dataUrl || '').startsWith('data:application/pdf') || /\.pdf$/i.test(att?.name || '');
       };
 
       const activeAttachmentRecord = useMemo(() => records.find(r => r.id === attachmentModalRecordId) || null, [records, attachmentModalRecordId]);
@@ -1905,22 +1934,167 @@
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
               <div className="bg-white rounded-2xl shadow-xl w-full max-w-xl overflow-hidden border border-slate-200">
                 <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center">
-                  <h3 className="text-base font-bold">[{activeAttachmentRecord.customer}] 첨부파일 관리</h3>
-                  <button onClick={() => setAttachmentModalRecordId(null)}><Icons.X className="w-5 h-5" /></button>
+                  <div>
+                    <h3 className="text-base font-bold">[{activeAttachmentRecord.customer}] 첨부파일 관리</h3>
+                    <p className="text-[11px] text-slate-400">총 {(activeAttachmentRecord.attachments || []).length}개의 파일 · 클릭하여 미리보기 및 삭제 가능</p>
+                  </div>
+                  <button onClick={() => { setAttachmentModalRecordId(null); setDeletingAttachmentId(null); }}><Icons.X className="w-5 h-5" /></button>
                 </div>
                 <div className="p-6 space-y-4">
-                  <label className="cursor-pointer block p-4 border-2 border-dashed border-blue-300 rounded-xl bg-blue-50/40 text-center text-xs font-bold text-blue-800">
+                  <label className="cursor-pointer block p-4 border-2 border-dashed border-blue-300 hover:bg-blue-50 transition-colors rounded-xl bg-blue-50/40 text-center text-xs font-bold text-blue-800">
                     {uploadingFile ? '업로드 중...' : '+ 클릭하여 사진 / 엑셀 / PDF 파일 추가'}
                     <input type="file" multiple onChange={(e) => handleAttachmentUpload(e, activeAttachmentRecord)} className="hidden" />
                   </label>
-                  <div className="space-y-2 max-h-60 overflow-y-auto">
-                    {(activeAttachmentRecord.attachments || []).map(att => (
-                      <div key={att.id} className="flex items-center justify-between p-2.5 border rounded-lg text-xs">
-                        <span className="font-bold truncate">{att.name}</span>
-                        <a href={att.dataUrl} download={att.name} className="px-2.5 py-1 bg-blue-600 text-white rounded font-bold">다운로드</a>
-                      </div>
-                    ))}
+                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                    {(activeAttachmentRecord.attachments || []).length === 0 ? (
+                      <p className="text-center py-8 text-xs text-slate-400">등록된 첨부파일이 없습니다.</p>
+                    ) : (
+                      (activeAttachmentRecord.attachments || []).map(att => {
+                        const isImg = isImageAttachment(att);
+                        const isPdf = isPdfAttachment(att);
+                        return (
+                          <div key={att.id} className="flex items-center justify-between gap-2 p-2.5 border border-slate-200 hover:border-blue-300 rounded-xl bg-slate-50/60 text-xs">
+                            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                              {isImg ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewAttachment(att)}
+                                  className="w-10 h-10 rounded-lg overflow-hidden border border-slate-300 shrink-0 bg-white hover:ring-2 hover:ring-blue-500"
+                                  title="클릭하여 이미지 미리보기"
+                                >
+                                  <img src={att.dataUrl} alt={att.name} className="w-full h-full object-cover" />
+                                </button>
+                              ) : (
+                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 border ${isPdf ? 'bg-red-50 text-red-600 border-red-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+                                  {isPdf ? <Icons.FileText className="w-5 h-5" /> : <Icons.FileSpreadsheet className="w-5 h-5" />}
+                                </div>
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewAttachment(att)}
+                                  className="font-bold text-slate-800 hover:text-blue-600 truncate block text-left w-full"
+                                >
+                                  {att.name}
+                                </button>
+                                <p className="text-[10px] text-slate-400 mt-0.5 truncate">
+                                  {formatFileSize(att.size)} {att.uploadedBy ? `· ${att.uploadedBy}` : ''} {att.uploadedAt ? `· ${att.uploadedAt}` : ''}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setPreviewAttachment(att)}
+                                className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-bold inline-flex items-center gap-1"
+                                title="미리보기"
+                              >
+                                <Icons.Eye className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">미리보기</span>
+                              </button>
+                              <a
+                                href={att.dataUrl}
+                                download={att.name}
+                                className="px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold inline-flex items-center gap-1"
+                                title="다운로드"
+                              >
+                                <Icons.Download className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">저장</span>
+                              </a>
+                              {deletingAttachmentId === att.id ? (
+                                <div className="flex items-center gap-1 bg-red-50 border border-red-200 px-1.5 py-1 rounded-lg">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteAttachment(activeAttachmentRecord, att.id)}
+                                    className="px-2 py-0.5 bg-red-600 text-white rounded font-bold"
+                                  >
+                                    확인
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeletingAttachmentId(null)}
+                                    className="px-1.5 py-0.5 bg-white border border-slate-300 text-slate-600 rounded font-bold"
+                                  >
+                                    취소
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setDeletingAttachmentId(att.id)}
+                                  className="p-1.5 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded-lg"
+                                  title="첨부파일 삭제"
+                                >
+                                  <Icons.Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 첨부파일 미리보기 모달 */}
+          {previewAttachment && (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" onClick={() => setPreviewAttachment(null)}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden border border-slate-700" onClick={(e) => e.stopPropagation()}>
+                <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="text-sm sm:text-base font-bold truncate">{previewAttachment.name}</h3>
+                    <p className="text-[11px] text-slate-400">
+                      {formatFileSize(previewAttachment.size)} {previewAttachment.uploadedBy ? `· ${previewAttachment.uploadedBy}` : ''} {previewAttachment.uploadedAt ? `· ${previewAttachment.uploadedAt}` : ''}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <a
+                      href={previewAttachment.dataUrl}
+                      download={previewAttachment.name}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold inline-flex items-center gap-1"
+                    >
+                      <Icons.Download className="w-3.5 h-3.5" /> 다운로드
+                    </a>
+                    <button onClick={() => setPreviewAttachment(null)} className="p-1 text-slate-400 hover:text-white">
+                      <Icons.X className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+                <div className="p-4 bg-slate-100 flex items-center justify-center min-h-[300px] max-h-[78vh] overflow-auto">
+                  {isImageAttachment(previewAttachment) ? (
+                    <img
+                      src={previewAttachment.dataUrl}
+                      alt={previewAttachment.name}
+                      className="max-w-full max-h-[72vh] rounded-lg shadow-md object-contain bg-white"
+                    />
+                  ) : isPdfAttachment(previewAttachment) ? (
+                    <iframe
+                      src={previewAttachment.dataUrl}
+                      title={previewAttachment.name}
+                      className="w-full h-[70vh] rounded-lg border border-slate-300 bg-white"
+                    />
+                  ) : (
+                    <div className="text-center py-10 px-6 bg-white rounded-xl border border-slate-200 shadow-sm max-w-md w-full space-y-3">
+                      <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                        <Icons.FileSpreadsheet className="w-8 h-8" />
+                      </div>
+                      <p className="text-sm font-bold text-slate-800 break-all">{previewAttachment.name}</p>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        엑셀·문서 파일은 브라우저 내 직접 미리보기가 지원되지 않습니다.<br />아래 버튼을 눌러 파일을 다운로드하여 확인해 주세요.
+                      </p>
+                      <a
+                        href={previewAttachment.dataUrl}
+                        download={previewAttachment.name}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold"
+                      >
+                        <Icons.Download className="w-4 h-4" /> 파일 다운로드
+                      </a>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
